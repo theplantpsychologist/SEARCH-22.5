@@ -108,7 +108,7 @@ def get_best_candidates(embedding = None, top_k=5):
             # State.layer_goodness * 
             State.tree_efficiency * (3.0 / func.sqrt(State.generation + 1)) # SQL-side calculation
         ))
-        .limit(3000 if embedding is not None else top_k)  # Grab the top N best parents
+        .limit(100000 if embedding is not None else top_k)  # Grab the top N best parents
         .all()
     )
     if embedding is None:
@@ -124,6 +124,26 @@ def get_best_candidates(embedding = None, top_k=5):
     distances.sort(key=lambda x: x[0])
     return [candidate for _, candidate in distances[:top_k]], [dist for dist, _ in distances[:top_k]]
 
+def find_closest_matches(tree,top_k = 8):
+    """
+    Look through the ENTIRE database and find the top_k closest matches to the given tree based on embedding distance.
+    """
+    target_embedding = extract_eigenvalues(tree)
+    candidates = (
+        session.query(State)
+    )
+    distances = []
+    for candidate in candidates:
+        s_sig = np.frombuffer(candidate.embedding, dtype=np.float32)
+        dist = np.linalg.norm(target_embedding - s_sig) # Euclidean Distance
+        # goodness = candidate.layer_goodness
+        # efficiency = candidate.tree_efficiency
+        # generation = candidate.generation
+        distances.append((dist, candidate))
+    distances.sort(key=lambda x: x[0])
+    return [candidate for _, candidate in distances[:top_k]], [dist for dist, _ in distances[:top_k]]
+
+
 if __name__ == "__main__":
     profiler = cProfile.Profile()
     profiler.enable()
@@ -132,6 +152,18 @@ if __name__ == "__main__":
     print("===== Start Test =====")
     size0 = session.query(State).count()
     t0 = time.time()
+
+
+    # tree = random_tree(15)
+    # matches,distances = find_closest_matches(tree, top_k=16)
+    # folds = [unfreeze(np.frombuffer(candidate.binary_state, dtype=np.int16)) for candidate in matches]
+    # print(f"Closest match out of {size0} states, distance: {distances[0]:.4f} found in {time.time() - t0:.2f} seconds.")
+    # plot_multi_state_grid(folds, packing_instead_of_cp=True, labels = np.round(distances, decimals=3))
+    # plot_trees([tree])
+    # raise
+
+
+    size0 = session.query(State).count()
     print("Initial number of states in the database: ", size0)
 
     binary_root = np.array(canonicalize(ROOT), dtype=np.int16).tobytes()
@@ -166,10 +198,10 @@ if __name__ == "__main__":
     temp = t0
     distances = [0]
     while time.time() - t0 < 300:
-        if time.time() - temp > 30:
+        if time.time() - temp > 60:
             print("Switching to a new training tree")
             # time to switch and train on an increasingly growing new tree
-            tree = random_tree(20 + len(random_trees))
+            tree = random_tree(8 + len(random_trees))
             random_trees.append(tree)
             target_embedding = extract_eigenvalues(tree)
         if not parents_queue:
