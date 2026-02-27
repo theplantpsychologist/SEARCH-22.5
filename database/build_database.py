@@ -17,6 +17,8 @@ import time
 import cProfile
 import pstats
 
+from wakepy import keep
+
 import psutil
 from src.engine.fold225 import Fold225, ROOT, canonicalize, unfreeze, plot_multi_state_grid
 from src.engine.tree import extract_eigenvalues, random_tree, plot_trees
@@ -154,14 +156,6 @@ if __name__ == "__main__":
     t0 = time.time()
 
 
-    # tree = random_tree(15)
-    # matches,distances = find_closest_matches(tree, top_k=16)
-    # folds = [unfreeze(np.frombuffer(candidate.binary_state, dtype=np.int16)) for candidate in matches]
-    # print(f"Closest match out of {size0} states, distance: {distances[0]:.4f} found in {time.time() - t0:.2f} seconds.")
-    # plot_multi_state_grid(folds, packing_instead_of_cp=True, labels = np.round(distances, decimals=3))
-    # plot_trees([tree])
-    # raise
-
 
     size0 = session.query(State).count()
     print("Initial number of states in the database: ", size0)
@@ -190,30 +184,32 @@ if __name__ == "__main__":
         session.commit()
         print("Added root to database.")
     
-    tree= random_tree(20)
+    tree= random_tree(8)
     target_embedding = extract_eigenvalues(tree)
 
     random_trees = []
     parents_queue = []
     temp = t0
     distances = [0]
-    while time.time() - t0 < 300:
-        if time.time() - temp > 60:
-            print("Switching to a new training tree")
-            # time to switch and train on an increasingly growing new tree
-            tree = random_tree(8 + len(random_trees))
-            random_trees.append(tree)
-            target_embedding = extract_eigenvalues(tree)
-        if not parents_queue:
-            # Add some parents to the queue
-            top_candidates, distances = get_best_candidates(embedding=target_embedding, top_k=5)
-            for candidate in top_candidates:
-                parents_queue.append((candidate,candidate.binary_state, candidate.id))
-            print(f"Total states: {session.query(State).count()} | Time elapsed: {time.time() - t0:.2f}s |  RAM usage: {current_memory_usage() / 1024 / 1024:.2f} MB | Best distance: {distances[0]:.4f}")
-        else:
-            candidate, binary_parent, parent_id = parents_queue.pop(0)
-            children = expand_parent(unfreeze(np.frombuffer(binary_parent, dtype=np.int16)), parent_id=parent_id)
-            candidate.has_children = True
+
+    with keep.running():
+        while time.time() - t0 < 60*60*4:
+            if time.time() - temp > 300:
+                print("Switching to a new training tree")
+                # time to switch and train on an increasingly growing new tree
+                tree = random_tree(8 + len(random_trees))
+                random_trees.append(tree)
+                target_embedding = extract_eigenvalues(tree)
+            if not parents_queue:
+                # Add some parents to the queue
+                top_candidates, distances = get_best_candidates(embedding=target_embedding, top_k=5)
+                for candidate in top_candidates:
+                    parents_queue.append((candidate,candidate.binary_state, candidate.id))
+                print(f"Total states: {session.query(State).count()} | Time elapsed: {time.time() - t0:.2f}s |  RAM usage: {current_memory_usage() / 1024 / 1024:.2f} MB | Best distance: {distances[0]:.4f}")
+            else:
+                candidate, binary_parent, parent_id = parents_queue.pop(0)
+                children = expand_parent(unfreeze(np.frombuffer(binary_parent, dtype=np.int16)), parent_id=parent_id)
+                candidate.has_children = True
 
 
     profiler.disable()
@@ -225,7 +221,7 @@ if __name__ == "__main__":
     print("total number of states in the database: ", sizefinal)
     print(f"Added {sizefinal - size0} states in {time.time() - t0:.2f} seconds.")
     print("===== End Test =====")
-
+    plot_trees(random_trees)    
     view_best_states(n=50, target_embedding=target_embedding)
-    plot_trees(random_trees)
+    
 
