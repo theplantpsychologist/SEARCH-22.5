@@ -54,13 +54,14 @@ import pstats
 import math
 import os
 from collections import deque, defaultdict
+import sys
 
 import matplotlib.pyplot as plt
 from matplotlib.patches import Polygon
 
 import networkx as nx
 
-from engine.math225_core import (
+from src.engine.math225_core import (
     Fraction,
     Vertex4D,
     reflect,
@@ -68,15 +69,8 @@ from engine.math225_core import (
     canonicalize_fast,
     flatten_cpp,
 )
-from cp225 import Cp225
+from src.engine.cp225 import Cp225
 
-BOUNDARY_CORNERS = {
-    Vertex4D(-1, 0, -1, 0),
-    Vertex4D(1, 0, -1, 0),
-    Vertex4D(1, 0, 1, 0),
-    Vertex4D(-1, 0, 1, 0),
-}
-SQUARE_SIZE = 2
 
 ALPHA = 0.1  # transparency factor. 0.2 for 40gsm tracing paper
 X = Vertex4D(1, 0, 0, 0)
@@ -949,23 +943,34 @@ class Fold225:
         return children
 
     def get_children(
-        self, raycast=True, bp=False, midpoints=True, components_to_flip="ALL"
+        self, raycast=True, bp=False, midpoints=True, components_to_flip="ONE"
     ) -> dict:
         """
-        returns a dictionary of unique children, each mapping to itself (the parent)
+        returns a set of canonicalized children
 
         Slice parameters:
         - raycast: slice from 22.5 angles out of all vertices
         - bp: restrict slices to 45 degree angles
         - midpoints: allow perpendicular edge bisectors as slices
 
-        Flipping parameters:
+        Flipping parameter:
         - components_to_flip: "ALL" to fold through all layers, "ONE" to fold one component at a time, or "ANY" to fold any combination of layers
         """
         slices = self.get_slices(raycast=raycast, bp=bp, midpoints=midpoints)
 
         canonical_self = canonicalize(self)
-        children = {}
+        # children = {}
+        # for _, slice_ in enumerate(slices):
+        #     new_children = self.fold_along_slice(*slice_, components_to_flip)
+        #     for child in new_children:
+        #         canonical_child = canonicalize(child)
+        #         if (
+        #             canonical_child != canonical_self
+        #             and canonical_child not in children
+        #         ):
+        #             children[canonical_child] = canonical_self
+        # return children
+        children = set()
         for _, slice_ in enumerate(slices):
             new_children = self.fold_along_slice(*slice_, components_to_flip)
             for child in new_children:
@@ -974,7 +979,7 @@ class Fold225:
                     canonical_child != canonical_self
                     and canonical_child not in children
                 ):
-                    children[canonical_child] = canonical_self
+                    children.add(canonical_child)
         return children
 
     # ================= Visualization and evaluation ==================
@@ -1962,7 +1967,25 @@ class FoldEvolver:
         """Returns the absolute best folds found across all generations."""
         ranked = self._rank_candidates(list(self.family_tree.keys()), criteria=criteria)
         return [unfreeze(f) for f, score in ranked[:top_n]]
+    
 
+BOUNDARY_CORNERS = {
+    Vertex4D(-1, 0, -1, 0),
+    Vertex4D(1, 0, -1, 0),
+    Vertex4D(1, 0, 1, 0),
+    Vertex4D(-1, 0, 1, 0),
+}
+cp = Cp225(
+        vertices=list(BOUNDARY_CORNERS),
+        edges=[
+            (0, 1, "b"),
+            (1, 2, "b"),
+            (2, 3, "b"),
+            (3, 0, "b"),
+        ],
+    )
+ROOT = cp_to_fold(cp)
+SQUARE_SIZE = 2
 
 if __name__ == "__main__":
     profiler = cProfile.Profile()
@@ -1971,18 +1994,8 @@ if __name__ == "__main__":
     print("===== Start Test =====")
 
 
-    cp = Cp225(
-        vertices=list(BOUNDARY_CORNERS),
-        edges=[
-            (0, 1, "b"),
-            (1, 2, "b"),
-            # (2, 0, "b"),
-            (2, 3, "b"),
-            (3, 0, "b"),
-        ],
-    )
-    root = cp_to_fold(cp)
-    evolver = FoldEvolver(root)
+    
+    evolver = FoldEvolver(ROOT)
     # Gen 2 : evolve everyone
     evolver.evolve()
     frozen = evolver.family_tree.keys()
@@ -1993,14 +2006,14 @@ if __name__ == "__main__":
     evolver.evolve(num_generations=1, select_percent=0.5)
 
     # Gen 4: Only 30% move on
-    evolver.evolve(num_generations=1, select_n=300)
+    # evolver.evolve(num_generations=1, select_n=300)
 
     # Gen 5: Only 10% move on
     # evolver.evolve(num_generations=1, select_n=300)
 
     # Plot final results
-    # top_folds = evolver.get_top_folds(100)
-    # plot_multi_state_grid(folds=top_folds)
+    top_folds = evolver.get_top_folds(100)
+    plot_multi_state_grid(folds=top_folds)
 
     profiler.disable()
     stats = pstats.Stats(profiler)

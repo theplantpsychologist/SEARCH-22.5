@@ -2,7 +2,7 @@
 Mid level (crease patterns) 22.5 functions and classes
 """
 
-from engine.math225_core import Vertex4D
+from src.engine.math225_core import Vertex4D
 
 BOUNDARY_CORNERS = {
     Vertex4D(-1, 0, -1, 0),

@@ -10,6 +10,9 @@ dependencies = [
     "matplotlib",
     "faiss-cpu",
     "numpy",
+    "mmh3",
+    "sqlalchemy",
+    "scipy"
 ]
 
 [tool.setuptools]
