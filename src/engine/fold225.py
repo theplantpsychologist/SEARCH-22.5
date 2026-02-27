@@ -54,6 +54,7 @@ import pstats
 import math
 import os
 from collections import deque, defaultdict
+from random import random
 import sys
 
 import matplotlib.pyplot as plt
@@ -70,7 +71,7 @@ from src.engine.math225_core import (
     flatten_cpp,
 )
 from src.engine.cp225 import Cp225
-
+from src.engine.tree import merge_edges, get_proportional_tree_pos
 
 ALPHA = 0.1  # transparency factor. 0.2 for 40gsm tracing paper
 X = Vertex4D(1, 0, 0, 0)
@@ -959,17 +960,7 @@ class Fold225:
         slices = self.get_slices(raycast=raycast, bp=bp, midpoints=midpoints)
 
         canonical_self = canonicalize(self)
-        # children = {}
-        # for _, slice_ in enumerate(slices):
-        #     new_children = self.fold_along_slice(*slice_, components_to_flip)
-        #     for child in new_children:
-        #         canonical_child = canonicalize(child)
-        #         if (
-        #             canonical_child != canonical_self
-        #             and canonical_child not in children
-        #         ):
-        #             children[canonical_child] = canonical_self
-        # return children
+
         children = set()
         for _, slice_ in enumerate(slices):
             new_children = self.fold_along_slice(*slice_, components_to_flip)
@@ -1199,19 +1190,7 @@ class Fold225:
             tree.add_edge(u, v, length=dist, weight=1.0 / dist, comp_id=c_idx)
 
         # --- 5. Simplification ---
-        removed_nodes = set()
-        while True:
-            to_merge = [n for n in tree.nodes() if tree.degree(n) == 2]
-            if not to_merge:
-                break
-
-            n = to_merge[0]
-            neighbors = list(tree.neighbors(n))
-            u, v = neighbors[0], neighbors[1]
-            new_len = tree[u][n]["length"] + tree[n][v]["length"]
-            tree.remove_node(n)
-            tree.add_edge(u, v, length=new_len, weight=1.0 / new_len)
-            removed_nodes.add(n)
+        tree, removed_nodes = merge_edges(tree)
 
         if not include_packing:
             return tree, (current_fold, None)
@@ -1461,27 +1440,8 @@ def plot_multiple(folds: list[Fold225], debug=False):
     print(f"Saved render to {filepath}")
 
 
-def get_proportional_tree_pos(G):
-    """
-    Tree plot helper
-    """
-    if not G.nodes():
-        return {}
-
-    # 1. Calculate the full distance matrix for the tree
-    full_dist_matrix = dict(nx.all_pairs_dijkstra_path_length(G, weight="length"))
-
-    try:
-        pos = nx.kamada_kawai_layout(G, dist=full_dist_matrix, scale=1.0)
-    except:
-        # Fallback to a basic tree layout if the matrix is problematic
-        pos = nx.spring_layout(G, weight="weight", iterations=200)
-
-    return pos
-
-
 def plot_multi_state_grid(
-    folds, cps=None, trees=None, packings=None, packing_instead_of_cp=True
+    folds, cps=None, trees=None, packings=None, packing_instead_of_cp=True, labels = None
 ):
     """
     Plots n entries in a grid.
@@ -1513,7 +1473,9 @@ def plot_multi_state_grid(
 
     # Layout calculations
     # c macro-columns
-    c = max(1, math.floor(math.sqrt(n / 4)))
+    # c = max(1, math.floor(math.sqrt(n / 4)))
+    # r = math.ceil(n / c)
+    c = max(1, math.floor(math.sqrt(n*3/8)))
     r = math.ceil(n / c)
 
     # Total internal columns = c * 4 (Fold, CP, Tree, Space)
@@ -1587,7 +1549,7 @@ def plot_multi_state_grid(
         ax_space.axis("off")
 
         ax_cp.set_title(
-            f"Fold ({i}),   Goodness: {fold.goodness():.4f},   Efficiency: {sum(nx.get_edge_attributes(G, 'length').values()) /4 :.2f}",
+            f"Fold ({i}) {labels[i] if labels is not None else ''} | Goodness: {fold.goodness():.4f},   Efficiency: {sum(nx.get_edge_attributes(G, 'length').values()) /4 :.2f}",
             fontsize=24,
         )
 
@@ -1883,7 +1845,7 @@ class FoldEvolver:
         )
         # We store the "current" generation as a list of frozen states
         # Start with root, but we won't add root to the family_tree per your request
-        self.current_generation = list(self.family_tree.keys())
+        self.current_generation = list(self.family_tree)
         self.generation_count = 1
 
     def evolve(self, num_generations=1, select_n=None, select_percent=None):
@@ -1905,7 +1867,7 @@ class FoldEvolver:
                     raycast=True, bp=False, midpoints=False, components_to_flip="ONE"
                 )
 
-                for frozen_child, _ in children.items():
+                for frozen_child in children:
                     # Only track and process if we haven't seen this state before
                     if frozen_child not in self.family_tree:
                         # Map child to parent for tree tracking
@@ -1965,7 +1927,7 @@ class FoldEvolver:
 
     def get_top_folds(self, top_n=100, criteria="goodness"):
         """Returns the absolute best folds found across all generations."""
-        ranked = self._rank_candidates(list(self.family_tree.keys()), criteria=criteria)
+        ranked = self._rank_candidates(list(self.family_tree), criteria=criteria)
         return [unfreeze(f) for f, score in ranked[:top_n]]
     
 
@@ -1992,13 +1954,11 @@ if __name__ == "__main__":
     profiler.enable()
 
     print("===== Start Test =====")
-
-
     
     evolver = FoldEvolver(ROOT)
     # Gen 2 : evolve everyone
     evolver.evolve()
-    frozen = evolver.family_tree.keys()
+    frozen = evolver.family_tree
     unfrozen = [unfreeze(f) for f in frozen]
     plot_multiple(unfrozen)
 
