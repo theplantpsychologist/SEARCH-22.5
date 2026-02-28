@@ -99,7 +99,7 @@ def compute_children_task(parent_id, binary_parent, generation):
     children_data = []
     
     # Compute children (The CPU-intensive part)
-    frozen_children = fold.get_children(raycast=True, bp=False, midpoints=False, components_to_flip="ONE")
+    frozen_children = fold.get_children(raycast=True, bp=False, midpoints=True, components_to_flip="ONE")
     
     for frozen_child in frozen_children:
         unfrozen_child = unfreeze(frozen_child)
@@ -126,7 +126,7 @@ def compute_children_task(parent_id, binary_parent, generation):
         })
     return children_data
 
-def main_parallel(time_limit=60, time_per_tree=10):
+def main_parallel(time_limit=60, time_per_tree=10, tree_growth_rate = 1):
     t0 = time.time()
     num_workers = os.cpu_count() - 2 
     
@@ -147,7 +147,7 @@ def main_parallel(time_limit=60, time_per_tree=10):
                 if len(futures) < num_workers:
                     # Tree switching logic
                     if time.time() - temp >= time_per_tree:
-                        tree = random_tree(8 + len(random_trees))
+                        tree = random_tree(8 + len(random_trees)* np.floor(len(random_trees) * tree_growth_rate).astype(int))
                         print(f"\n--- Switching to a new training tree with {len(tree.nodes())} nodes---")
                         random_trees.append(tree)
                         target_embedding = extract_eigenvalues(tree, dim=DIMENSION)
@@ -220,7 +220,8 @@ def view_best_matches(n=16, target_embedding=None ):
     tf = time.time()
     folds = [unfreeze(np.frombuffer(state.binary_state, dtype=np.int16)) for state in best_states]
     plot_multi_state_grid(folds, packing_instead_of_cp=True, labels = np.round(distances, decimals=3))
-    print(f"Plotted top {len(folds)} states. Best distance: {min(distances)} | Search time: {tf - t0:.2f}s")
+    print(f"Plotted top {len(folds)} states. Best distance: {min(distances):.4f} | Search time: {tf - t0:.2f}s")
+    return best_states, distances
 
 def current_memory_usage():
     process = psutil.Process(os.getpid())
@@ -278,6 +279,7 @@ def get_best_candidates_faiss(target_embedding, top_k=5):
     for dist, idx in zip(D[0], I[0]):
         db_id = faiss_to_db_id[idx]
         candidate = session.query(State).get(db_id)
+        # candidate = session.get(db_id, ident=db_id)  # More efficient than filter_by for primary key
         
         if not candidate.has_children:
             best_states.append(candidate)
@@ -310,10 +312,45 @@ def find_closest_matches(tree, top_k=8):
 
     return results, [id_to_dist[r.id] for r in results]
 
+
+
+def view_sequence(state_id):
+    sequence = []
+    current_id = state_id
+    
+    while current_id is not None:
+        state = session.query(State).get(current_id)
+        sequence.append(state)
+        current_id = state.parent_id
+    
+    sequence = list(reversed(sequence))
+    folds = [unfreeze(np.frombuffer(state.binary_state, dtype=np.int16)) for state in sequence]
+    plot_multi_state_grid(folds, packing_instead_of_cp=True)
+
 if __name__ == "__main__":
     profiler = cProfile.Profile()
     profiler.enable()
 
+
+    sqrt2 = np.float32(np.sqrt(2))
+    test_tree = nx.Graph()
+    test_tree.add_weighted_edges_from([
+        (0, 1, 1.0), 
+        (0, 2, sqrt2 + 1), 
+        (0, 3, sqrt2 + 1),
+        (0, 4, sqrt2 + 1),
+        (0, 5, sqrt2 + 1),
+        (0, 6, sqrt2 + 1),
+        (0, 7, 1.0),
+        (0, 8, 1.0),
+        (1, 9, 1.0),
+    ], weight='length')
+
+
+
+    best_states, distances = view_best_matches(n=16, target_embedding=extract_eigenvalues(test_tree, dim=DIMENSION))
+    plot_trees([test_tree])
+    raise
 
     print("===== Start Test =====")
     size0 = session.query(State).count()
@@ -350,7 +387,7 @@ if __name__ == "__main__":
     
 
 
-    main_parallel(time_limit=120, time_per_tree = 10)  # Run the parallel expansion for 1 minute
+    main_parallel(time_limit=60 * 60 * 3, time_per_tree = 30, tree_growth_rate = 0.1)  
 
     profiler.disable()
     stats = pstats.Stats(profiler)
@@ -362,8 +399,10 @@ if __name__ == "__main__":
     print(f"Added {sizefinal - size0} states in {time.time() - t0:.2f} seconds. Average states/s: {(sizefinal - size0) / (time.time() - t0):.2f}")
 
     test_tree = random_tree(15)
-    view_best_matches(n=16, target_embedding=extract_eigenvalues(test_tree, dim=DIMENSION))
+    best_states, distances = view_best_matches(n=16, target_embedding=extract_eigenvalues(test_tree, dim=DIMENSION))
     plot_trees([test_tree])
+
+    view_sequence(best_states[0].id)
 
     print("===== End Test =====")
     
