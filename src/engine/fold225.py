@@ -67,8 +67,9 @@ from src.engine.math225_core import (
     Vertex4D,
     reflect,
     reflect_group,
-    canonicalize_fast,
+    canonicalize_cpp,
     flatten_cpp,
+    split_and_rebuild_cpp
 )
 from src.engine.cp225 import Cp225
 from src.engine.tree import merge_edges, get_proportional_tree_pos
@@ -128,20 +129,14 @@ class Fold225:
         return f"Fold225 with Vertices={self.vertices},\nEdges={self.edges},\nFaces={self.faces},{instances_str}"
 
     def cpp_instances(self):
-        """Converts the instances list into a flat format suitable for C++ processing. Each connection is converted from (f2, i2) to a single integer index based on the face and instance indices. Boundary edges are represented as (-1, -1) instead of None."""
-        cpp_instances = []
-        for face_stack in self.instances:
-            cpp_stack = []
-            for inst in face_stack:
-                cpp_inst = []
-                for conn in inst:
-                    if conn is None:
-                        cpp_inst.append((-1, -1))
-                    else:
-                        cpp_inst.append(conn)
-                cpp_stack.append(cpp_inst)
-            cpp_instances.append(cpp_stack)
-        return cpp_instances
+        """Converts the instances list into a flat format suitable for C++ processing. Boundary edges are represented as (-1, -1) instead of None."""
+        return [
+            [
+                [conn if conn is not None else (-1, -1) for conn in inst]
+                for inst in stack
+            ]
+            for stack in self.instances
+        ]
 
     # ================= Children generation ==================
 
@@ -243,7 +238,7 @@ class Fold225:
             else:
                 vertex_sides.append(0)
         if not (-1 in vertex_sides and 1 in vertex_sides):
-            return vertex_sides, [], self.vertices
+            return vertex_sides, {}, self.vertices
 
         new_vertices = list(self.vertices)
 
@@ -266,219 +261,29 @@ class Fold225:
 
         return vertex_sides, intersections, new_vertices
 
-    def split_topology(self, vertex_sides, intersections):
+    def split_and_rebuild(self, vertex_sides, intersections):
         """
-        Rebuilds edges, faces, and instances for a Fold225 object after slicing.
+        Slices the geometric topology and seamlessly reroutes the positional 
+        instance connection map via the C++ engine.
         """
-        new_edges = []
-        edge_lookup = {}
-
-        def get_e(u, v):
-            key = tuple(sorted((u, v)))
-            if key in edge_lookup:
-                return edge_lookup[key]
-            idx = len(new_edges)
-            new_edges.append((u, v))
-            edge_lookup[key] = idx
-            return idx
-
-        # Map old edge indices to a list of new segment indices
-        old_edge_map = {}
-        for e_idx, (v1, v2) in enumerate(self.edges):
-            if e_idx in intersections:
-                iv = intersections[e_idx]
-                # Split: v1 -> Intersection, Intersection -> v2
-                old_edge_map[e_idx] = [get_e(v1, iv), get_e(iv, v2)]
-            else:
-                old_edge_map[e_idx] = [get_e(v1, v2)]
-
-        new_faces = []
-        old_face_map = defaultdict(list)
-
-        for f_idx, face_edges in enumerate(self.faces):
-            # --- A. Reconstruct the full Vertex Loop (including intersection points) ---
-
-            # Find start vertex by checking connectivity of first/last edges
-            loop_verts = []
-            e_last, e_first = face_edges[-1], face_edges[0]
-            v_start = None
-            set_first = set(self.edges[e_first])
-            if self.edges[e_last][0] in set_first:
-                v_start = self.edges[e_last][0]
-            else:
-                v_start = self.edges[e_last][1]
-
-            curr_v = v_start
-            for e_idx in face_edges:
-                segments = old_edge_map[e_idx]
-                v_def_1, _ = self.edges[e_idx]
-
-                if curr_v == v_def_1:
-                    for seg_idx in segments:
-                        u, v = new_edges[seg_idx]
-                        next_v = v if u == curr_v else u
-                        loop_verts.append(curr_v)
-                        curr_v = next_v
-                else:
-                    for seg_idx in reversed(segments):
-                        u, v = new_edges[seg_idx]
-                        next_v = v if u == curr_v else u
-                        loop_verts.append(curr_v)
-                        curr_v = next_v
-
-            # --- B. Bifurcate the Loop ---
-            loop_sides = [vertex_sides[v] for v in loop_verts]
-            if not (1 in loop_sides and -1 in loop_sides):
-                # Face is entirely on one side; map vertices back to edges
-                f_new = [
-                    get_e(loop_verts[i], loop_verts[(i + 1) % len(loop_verts)])
-                    for i in range(len(loop_verts))
-                ]
-                new_f_idx = len(new_faces)
-                new_faces.append(f_new)
-                old_face_map[f_idx].append(new_f_idx)
-                continue
-
-            # Find Entry (L->R) and Exit (R->L) pivots (Vertices with side 0)
-            entry_idx, exit_idx = -1, -1
-            n = len(loop_verts)
-            for i in range(n):
-                curr_s, nxt_s = loop_sides[i], loop_sides[(i + 1) % n]
-                if curr_s <= 0 and nxt_s == 1:
-                    entry_idx = i
-                elif curr_s >= 0 and nxt_s == -1:
-                    exit_idx = i
-
-            # Create Left and Right polygon chains
-            left_chain, right_chain = [], []
-            curr = exit_idx
-            while True:
-                left_chain.append(loop_verts[curr])
-                if curr == entry_idx:
-                    break
-                curr = (curr + 1) % n
-
-            curr = entry_idx
-            while True:
-                right_chain.append(loop_verts[curr])
-                if curr == exit_idx:
-                    break
-                curr = (curr + 1) % n
-
-            # Convert chains to edge indices and add the internal crease
-            f_left = [
-                get_e(left_chain[i], left_chain[i + 1])
-                for i in range(len(left_chain) - 1)
+        new_edges, new_faces, cpp_new_insts = split_and_rebuild_cpp(
+            self.edges, 
+            self.faces, 
+            self.cpp_instances(), 
+            vertex_sides, 
+            intersections
+        )
+        
+        # Restore C++ (-1, -1) boundary values to Python's None type
+        new_instances = [
+            [
+                [conn if conn[0] != -1 else None for conn in inst]
+                for inst in stack
             ]
-            crease = get_e(left_chain[-1], left_chain[0])
-            f_left.append(crease)
-
-            f_right = [
-                get_e(right_chain[i], right_chain[i + 1])
-                for i in range(len(right_chain) - 1)
-            ]
-            f_right.append(crease)
-
-            # Store new face indices
-            idx_l, idx_r = len(new_faces), len(new_faces) + 1
-            new_faces.extend([f_left, f_right])
-            old_face_map[f_idx] = [idx_l, idx_r]
-
-        return new_edges, new_faces, old_edge_map, old_face_map
-
-    def rebuild_instances(
-        self, old_edge_map: dict, old_face_map: dict, new_faces: list[list[int]]
-    ):
-        """
-        Reconstructs the positional instance lists for a split Fold225.
-        Uses 'Slot-Based Matching' to ensure instances[f][i][j] always maps to new_faces[f][j].
-        """
-        old_instances = self.instances
-        old_faces = self.faces
-        new_instances = [[] for _ in new_faces]
-
-        # 1. First Pass: Create the new instances and map old (f, i) -> new [(f1, i1), (f2, i2)]
-        # i_map stores: old_f_i_tuple -> list of new_f_i_tuples
-        i_map = {}
-
-        for old_f_idx, old_face_insts in enumerate(old_instances):
-            new_f_indices = old_face_map[old_f_idx]
-
-            for old_i_idx, old_inst in enumerate(old_face_insts):
-                # Track where this specific instance is moving to
-                i_map[(old_f_idx, old_i_idx)] = []
-
-                for nf_idx in new_f_indices:
-                    current_new_face = new_faces[nf_idx]
-                    # Initialize instance with Nones matching the NEW face length
-                    # This fixes the T-junction length mismatch!
-                    new_inst = [None] * len(current_new_face)
-
-                    # A. Map inherited connections from the parent instance
-                    for old_slot, connection in enumerate(old_inst):
-                        old_e = old_faces[old_f_idx][old_slot]
-                        # Get the segments this old edge turned into
-                        segments = old_edge_map[old_e]
-                        for seg in segments:
-                            if seg in current_new_face:
-                                # Place the connection in the correct new positional slot
-                                slot = current_new_face.index(seg)
-                                new_inst[slot] = connection
-
-                    # B. Handle the Internal Crease if the face was split
-                    if len(new_f_indices) > 1:
-                        other_nf = (
-                            new_f_indices[1]
-                            if nf_idx == new_f_indices[0]
-                            else new_f_indices[0]
-                        )
-                        # Find the edge index shared between the two new siblings
-                        shared = set(current_new_face) & set(new_faces[other_nf])
-                        if shared:
-                            crease_e = list(shared)[0]
-                            crease_slot = current_new_face.index(crease_e)
-                            # We use a placeholder; we'll resolve the exact instance index in Pass 2
-                            new_inst[crease_slot] = ("INTERNAL", other_nf)
-
-                    new_ni_idx = len(new_instances[nf_idx])
-                    new_instances[nf_idx].append(new_inst)
-                    i_map[(old_f_idx, old_i_idx)].append((nf_idx, new_ni_idx))
-
-        # 2. Second Pass: Resolve indices (Update connection pointers)
-        for nf_idx, face_insts in enumerate(new_instances):
-            for ni_idx, inst in enumerate(face_insts):
-                for slot, conn in enumerate(inst):
-                    if conn is None:
-                        continue
-
-                    # Case A: Internal Crease (Sibling connection)
-                    if isinstance(conn, tuple) and conn[0] == "INTERNAL":
-                        other_nf = conn[1]
-                        # In a split, instance 0 of sibling 1 always connects to instance 0 of sibling 2
-                        # because we are mapping 1:1 from the parent stack index.
-                        inst[slot] = (other_nf, ni_idx)
-
-                    # Case B: Standard Inherited Connection
-                    else:
-                        targets = i_map.get(conn)
-                        if not targets:
-                            continue  # Should be border edge, already None
-
-                        if len(targets) == 1:
-                            inst[slot] = targets[0]
-                        else:
-                            # Split Target: Connect to the sibling that shares THIS specific edge
-                            current_edge = new_faces[nf_idx][slot]
-                            match_found = False
-                            for t_f, t_i in targets:
-                                if current_edge in new_faces[t_f]:
-                                    inst[slot] = (t_f, t_i)
-                                    match_found = True
-                                    break
-                            if not match_found:
-                                # Fallback/Error case: Edge exists in parent but not in split child
-                                inst[slot] = None
-        return new_instances
+            for stack in cpp_new_insts
+        ]
+            
+        return new_edges, new_faces, new_instances
 
     def merge_heal(self, sides, v_flip_set):
         """
@@ -848,18 +653,12 @@ class Fold225:
         """
 
         p2 = point + DIRECTIONS[angle % 8]
-        # 1. Get Geometric context
 
         sides, inters, new_v = self.get_split_info(point, angle)
 
-        # 2. Slice the paper (Topological change only)
-        new_edges, new_faces, old_edge_map, old_face_map = self.split_topology(
-            sides, inters
-        )
+        # Slice the paper (Topological change only)
+        new_edges, new_faces, new_instances = self.split_and_rebuild(sides, inters)
 
-        # 3. Rebuild instances
-        # old_edge_map: old edge index as key -> new edge indices, if split. If not split, just returns itself. old_face_map is similar
-        new_instances = self.rebuild_instances(old_edge_map, old_face_map, new_faces)
         sliced_fold = Fold225(
             vertices=new_v, edges=new_edges, faces=new_faces, instances=new_instances
         )
@@ -875,15 +674,13 @@ class Fold225:
                     final_verts.append(v)
             return [flatten(sliced_fold)]
 
-        # --- 4. Identify Connected Components (Flaps) using NetworkX ---
+        # Identify Connected Components (Flaps) using NetworkX 
         G = nx.Graph()
 
-        # A. Populate the graph with all instances as nodes
         for f_idx, face_insts in enumerate(sliced_fold.instances):
             for i_idx in range(len(face_insts)):
                 G.add_node((f_idx, i_idx))
 
-        # # B. Add edges where connectivity is NOT across a hinge
         edges_to_add = []
         hinge_edges = {
             i
@@ -900,10 +697,9 @@ class Fold225:
                         edges_to_add.append((u, neighbor))
         G.add_edges_from(edges_to_add)
 
-        # C. Extract connected components as a list of lists of (f_idx, i_idx)
         connected_components = [list(c) for c in nx.connected_components(G)]
 
-        # --- 5. Generate Children Folds ---
+        # Generate Children Folds
         children = []
         if components_to_flip == "ONE":
             for component in connected_components:
@@ -1038,7 +834,7 @@ class Fold225:
             (proj, unique_projections_map[proj]) for proj in sorted_unique_values
         ]
 
-        # Sweep-slice across every hinge point using split_topology
+        # Sweep-slice across every hinge point
         current_fold = self
         for _, v_idx in hinge_points:
             # Re-calculating split info for the modified fold
@@ -1047,10 +843,7 @@ class Fold225:
             )
 
             # Slicing creates new topology where faces are split along the 'hinge'
-            new_edges, new_faces, old_e_map, old_f_map = current_fold.split_topology(
-                sides, inters
-            )
-            new_insts = current_fold.rebuild_instances(old_e_map, old_f_map, new_faces)
+            new_edges, new_faces, new_insts = current_fold.split_and_rebuild(sides, inters)
             current_fold = Fold225(new_v, new_edges, new_faces, new_insts)
 
         # --- 3. Component Analysis ---
@@ -1281,7 +1074,7 @@ def canonicalize(fold: "Fold225"):
     Wrapper for the C++ canonicalization function. Converts the Fold225 object into a flat tuple of integers that represents its canonical form.
     """
     return tuple(
-        canonicalize_fast(fold.vertices, fold.edges, fold.faces, fold.cpp_instances())
+        canonicalize_cpp(fold.vertices, fold.edges, fold.faces, fold.cpp_instances())
     )
 
 
@@ -1472,9 +1265,6 @@ def plot_multi_state_grid(
         return
 
     # Layout calculations
-    # c macro-columns
-    # c = max(1, math.floor(math.sqrt(n / 4)))
-    # r = math.ceil(n / c)
     c = max(1, math.floor(math.sqrt(n*3/8)))
     r = math.ceil(n / c)
 
@@ -1698,18 +1488,13 @@ def flatten(fold: Fold225) -> Fold225:
     )
 
     # 3. Rebuild the Python object (Restore -1 to None)
-    new_instances = []
-    for face_stack in cpp_new_insts:
-        new_stack = []
-        for inst in face_stack:
-            new_inst = []
-            for conn in inst:
-                if conn[0] == -1:
-                    new_inst.append(None)
-                else:
-                    new_inst.append(tuple(conn))
-            new_stack.append(new_inst)
-        new_instances.append(new_stack)
+    new_instances = [
+        [
+            [conn if conn[0] != -1 else None for conn in inst]
+            for inst in stack
+        ]
+        for stack in cpp_new_insts
+    ]
 
     return Fold225(
         vertices=unique_verts,
@@ -1966,14 +1751,14 @@ if __name__ == "__main__":
     evolver.evolve(num_generations=1, select_percent=0.5)
 
     # Gen 4: Only 30% move on
-    # evolver.evolve(num_generations=1, select_n=300)
+    evolver.evolve(num_generations=1, select_n=300)
 
     # Gen 5: Only 10% move on
     # evolver.evolve(num_generations=1, select_n=300)
 
     # Plot final results
-    top_folds = evolver.get_top_folds(100)
-    plot_multi_state_grid(folds=top_folds)
+    # top_folds = evolver.get_top_folds(100)
+    # plot_multi_state_grid(folds=top_folds)
 
     profiler.disable()
     stats = pstats.Stats(profiler)

@@ -12,7 +12,9 @@ dependencies = [
     "numpy",
     "mmh3",
     "sqlalchemy",
-    "scipy"
+    "scipy",
+    "wakepy",
+    "psutil"
 ]
 
 [tool.setuptools]

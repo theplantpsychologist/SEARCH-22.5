@@ -346,7 +346,7 @@ struct State {
     }
 };
 
-py::tuple canonicalize_fast(
+py::tuple canonicalize_cpp(
     const std::vector<Vertex4D>& vertices, 
     const std::vector<std::pair<int, int>>& edges,
     const std::vector<std::vector<int>>& faces,
@@ -439,7 +439,7 @@ py::tuple canonicalize_fast(
             }
             
             //More iterations here make it less likely to have ties, but more expensive
-            for (int iter = 0; iter < 2; ++iter) {
+            for (int iter = 0; iter < 4; ++iter) {
                 auto next_sigs = sigs;
                 for (size_t f = 0; f < units.size(); ++f) {
                     for (size_t i = 0; i < units[f].instance_stack.size(); ++i) {
@@ -578,6 +578,245 @@ py::tuple canonicalize_fast(
     return internal_freeze(best_state_ptr->v, best_state_ptr->e, best_state_ptr->f, best_state_ptr->i);
 }
 
+// --- Slicing and Instance Rebuilding Core ---
+py::tuple split_and_rebuild_cpp(
+    const std::vector<std::pair<int, int>>& edges,
+    const std::vector<std::vector<int>>& faces,
+    const std::vector<std::vector<std::vector<std::pair<int, int>>>>& instances,
+    const std::vector<int>& vertex_sides,
+    const std::map<int, int>& intersections
+) {
+    std::vector<std::pair<int, int>> new_edges;
+    std::map<std::pair<int, int>, int> edge_lookup;
+    
+    // Helper to fetch or create unique undirected edges
+    auto get_e = [&](int u, int v) {
+        std::pair<int, int> key = {std::min(u, v), std::max(u, v)};
+        auto it = edge_lookup.find(key);
+        if (it != edge_lookup.end()) return it->second;
+        int idx = new_edges.size();
+        new_edges.push_back(key);
+        edge_lookup[key] = idx;
+        return idx;
+    };
+
+    // --- Step 1: Split Topology (Edges) ---
+    std::map<int, std::vector<int>> old_edge_map;
+    for (size_t e_idx = 0; e_idx < edges.size(); ++e_idx) {
+        auto it = intersections.find(e_idx);
+        if (it != intersections.end()) {
+            int iv = it->second;
+            old_edge_map[e_idx] = {get_e(edges[e_idx].first, iv), get_e(iv, edges[e_idx].second)};
+        } else {
+            old_edge_map[e_idx] = {get_e(edges[e_idx].first, edges[e_idx].second)};
+        }
+    }
+
+    // --- Step 2: Split Topology (Faces) ---
+    std::vector<std::vector<int>> new_faces;
+    std::map<int, std::vector<int>> old_face_map;
+
+    for (size_t f_idx = 0; f_idx < faces.size(); ++f_idx) {
+        const auto& face_edges = faces[f_idx];
+        if (face_edges.empty()) continue;
+
+        // Reconstruct Vertex Loop
+        std::vector<int> loop_verts;
+        int e_last = face_edges.back();
+        int e_first = face_edges.front();
+        int v_start = -1;
+        
+        int e_first_v0 = edges[e_first].first;
+        int e_first_v1 = edges[e_first].second;
+        if (edges[e_last].first == e_first_v0 || edges[e_last].first == e_first_v1) {
+            v_start = edges[e_last].first;
+        } else {
+            v_start = edges[e_last].second;
+        }
+
+        int curr_v = v_start;
+        for (int e_idx : face_edges) {
+            const auto& segments = old_edge_map[e_idx];
+            int v_def_1 = edges[e_idx].first;
+
+            if (curr_v == v_def_1) {
+                for (int seg_idx : segments) {
+                    int u = new_edges[seg_idx].first;
+                    int v = new_edges[seg_idx].second;
+                    int next_v = (u == curr_v) ? v : u;
+                    loop_verts.push_back(curr_v);
+                    curr_v = next_v;
+                }
+            } else {
+                for (auto it = segments.rbegin(); it != segments.rend(); ++it) {
+                    int seg_idx = *it;
+                    int u = new_edges[seg_idx].first;
+                    int v = new_edges[seg_idx].second;
+                    int next_v = (u == curr_v) ? v : u;
+                    loop_verts.push_back(curr_v);
+                    curr_v = next_v;
+                }
+            }
+        }
+
+        // Check if bifurcation is needed
+        bool has_pos = false, has_neg = false;
+        std::vector<int> loop_sides(loop_verts.size());
+        for (size_t i = 0; i < loop_verts.size(); ++i) {
+            int s = vertex_sides[loop_verts[i]];
+            loop_sides[i] = s;
+            if (s == 1) has_pos = true;
+            if (s == -1) has_neg = true;
+        }
+
+        if (!has_pos || !has_neg) {
+            std::vector<int> f_new;
+            for (size_t i = 0; i < loop_verts.size(); ++i) {
+                f_new.push_back(get_e(loop_verts[i], loop_verts[(i + 1) % loop_verts.size()]));
+            }
+            int new_f_idx = new_faces.size();
+            new_faces.push_back(f_new);
+            old_face_map[f_idx].push_back(new_f_idx);
+            continue;
+        }
+
+        // Bifurcate Face
+        int entry_idx = -1, exit_idx = -1;
+        int n = loop_verts.size();
+        for (int i = 0; i < n; ++i) {
+            int curr_s = loop_sides[i];
+            int nxt_s = loop_sides[(i + 1) % n];
+            if (curr_s <= 0 && nxt_s == 1) entry_idx = i;
+            else if (curr_s >= 0 && nxt_s == -1) exit_idx = i;
+        }
+
+        std::vector<int> left_chain, right_chain;
+        int curr = exit_idx;
+        while (true) {
+            left_chain.push_back(loop_verts[curr]);
+            if (curr == entry_idx) break;
+            curr = (curr + 1) % n;
+        }
+        curr = entry_idx;
+        while (true) {
+            right_chain.push_back(loop_verts[curr]);
+            if (curr == exit_idx) break;
+            curr = (curr + 1) % n;
+        }
+
+        std::vector<int> f_left, f_right;
+        for (size_t i = 0; i < left_chain.size() - 1; ++i) f_left.push_back(get_e(left_chain[i], left_chain[i + 1]));
+        int crease = get_e(left_chain.back(), left_chain.front());
+        f_left.push_back(crease);
+
+        for (size_t i = 0; i < right_chain.size() - 1; ++i) f_right.push_back(get_e(right_chain[i], right_chain[i + 1]));
+        f_right.push_back(crease);
+
+        int idx_l = new_faces.size();
+        new_faces.push_back(f_left);
+        int idx_r = new_faces.size();
+        new_faces.push_back(f_right);
+        old_face_map[f_idx] = {idx_l, idx_r};
+    }
+
+    // --- Step 3: Rebuild Instances (Pass 1 - Mapping) ---
+    std::vector<std::vector<std::vector<std::pair<int, int>>>> new_instances(new_faces.size());
+    std::map<std::pair<int, int>, std::vector<std::pair<int, int>>> i_map;
+
+    for (size_t old_f_idx = 0; old_f_idx < instances.size(); ++old_f_idx) {
+        const auto& old_face_insts = instances[old_f_idx];
+        const auto& new_f_indices = old_face_map[old_f_idx];
+
+        for (size_t old_i_idx = 0; old_i_idx < old_face_insts.size(); ++old_i_idx) {
+            const auto& old_inst = old_face_insts[old_i_idx];
+
+            for (int nf_idx : new_f_indices) {
+                const auto& current_new_face = new_faces[nf_idx];
+                std::vector<std::pair<int, int>> new_inst(current_new_face.size(), {-1, -1});
+
+                // Inherited connections
+                for (size_t old_slot = 0; old_slot < old_inst.size(); ++old_slot) {
+                    int old_e = faces[old_f_idx][old_slot];
+                    std::pair<int, int> connection = old_inst[old_slot];
+
+                    const auto& segments = old_edge_map[old_e];
+                    for (int seg : segments) {
+                        auto it = std::find(current_new_face.begin(), current_new_face.end(), seg);
+                        if (it != current_new_face.end()) {
+                            int slot = std::distance(current_new_face.begin(), it);
+                            new_inst[slot] = connection;
+                        }
+                    }
+                }
+
+                // Internal Crease Mapping
+                if (new_f_indices.size() > 1) {
+                    int other_nf = (nf_idx == new_f_indices[0]) ? new_f_indices[1] : new_f_indices[0];
+                    int crease_e = -1;
+                    for (int e1 : current_new_face) {
+                        auto it = std::find(new_faces[other_nf].begin(), new_faces[other_nf].end(), e1);
+                        if (it != new_faces[other_nf].end()) {
+                            crease_e = e1;
+                            break;
+                        }
+                    }
+                    if (crease_e != -1) {
+                        auto it = std::find(current_new_face.begin(), current_new_face.end(), crease_e);
+                        int crease_slot = std::distance(current_new_face.begin(), it);
+                        new_inst[crease_slot] = {-2, other_nf}; // -2 denotes INTERNAL
+                    }
+                }
+
+                int new_ni_idx = new_instances[nf_idx].size();
+                new_instances[nf_idx].push_back(new_inst);
+                i_map[{old_f_idx, old_i_idx}].push_back({nf_idx, new_ni_idx});
+            }
+        }
+    }
+
+    // --- Step 4: Rebuild Instances (Pass 2 - Pointer Resolution) ---
+    for (size_t nf_idx = 0; nf_idx < new_instances.size(); ++nf_idx) {
+        for (size_t ni_idx = 0; ni_idx < new_instances[nf_idx].size(); ++ni_idx) {
+            auto& inst = new_instances[nf_idx][ni_idx];
+            for (size_t slot = 0; slot < inst.size(); ++slot) {
+                auto& conn = inst[slot];
+                if (conn.first == -1) continue; // Leave boundaries alone
+
+                if (conn.first == -2) {
+                    // Resolve internal connection
+                    int other_nf = conn.second;
+                    conn = {other_nf, (int)ni_idx};
+                } else {
+                    auto it = i_map.find(conn);
+                    if (it == i_map.end() || it->second.empty()) {
+                        conn = {-1, -1};
+                        continue;
+                    }
+                    const auto& targets = it->second;
+                    if (targets.size() == 1) {
+                        conn = targets[0];
+                    } else {
+                        // Split Target Resolution
+                        int current_edge = new_faces[nf_idx][slot];
+                        bool match_found = false;
+                        for (const auto& target : targets) {
+                            const auto& target_face = new_faces[target.first];
+                            if (std::find(target_face.begin(), target_face.end(), current_edge) != target_face.end()) {
+                                conn = target;
+                                match_found = true;
+                                break;
+                            }
+                        }
+                        if (!match_found) conn = {-1, -1};
+                    }
+                }
+            }
+        }
+    }
+
+    return py::make_tuple(new_edges, new_faces, new_instances);
+}
+
 
 // --- Flatten Core ---
 py::tuple flatten_cpp(const std::vector<Vertex4D>& vertices,
@@ -640,7 +879,7 @@ py::tuple flatten_cpp(const std::vector<Vertex4D>& vertices,
             }
         }
         
-        // Reuse the exact same rotational canonicalization from canonicalize_fast!
+        // Reuse the exact same rotational canonicalization from canonicalize_cpp!
         auto result = canonicalize_face_indices(temp_face);
         std::vector<int> canon_f = std::get<0>(result);
         bool was_rev = std::get<1>(result);
@@ -801,6 +1040,7 @@ PYBIND11_MODULE(math225_core, m) {
         return result;
     });
 
-    m.def("canonicalize_fast", &canonicalize_fast);
+    m.def("canonicalize_cpp", &canonicalize_cpp);
     m.def("flatten_cpp", &flatten_cpp);
+    m.def("split_and_rebuild_cpp", &split_and_rebuild_cpp);
 }

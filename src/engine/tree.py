@@ -22,21 +22,32 @@ def random_tree(n):
 
 def merge_edges(tree):
     """
-    Remove nodes of degree 2 by merging their two edges into one
+    Remove nodes of degree 2 by merging their two edges into one.
+    Optimized to O(N) by calculating the merge list exactly once.
     """
     removed_nodes = set()
-    while True:
-        to_merge = [n for n in tree.nodes() if tree.degree(n) == 2]
-        if not to_merge:
-            break
-
-        n = to_merge[0]
+    
+    # 1. Find all degree 2 nodes in a single pass
+    to_merge = [n for n, d in tree.degree() if d == 2]
+    
+    # 2. Iterate through them without re-scanning the graph
+    for n in to_merge:
+        # Get neighbors before removing the node
         neighbors = list(tree.neighbors(n))
-        u, v = neighbors[0], neighbors[1]
+        
+        # Safety check (optional but good practice)
+        if len(neighbors) != 2:
+            continue
+            
+        u, v = neighbors
         new_len = tree[u][n]["length"] + tree[n][v]["length"]
+        
+        # Mutate the graph
         tree.remove_node(n)
         tree.add_edge(u, v, length=new_len, weight=1.0 / new_len)
+        
         removed_nodes.add(n)
+        
     return tree, removed_nodes
 
 def get_proportional_tree_pos(G):

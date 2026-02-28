@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Draw Weighted Tree</title>
+    <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+    <style>
+        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; }
+        #mynetwork {
+            width: 800px;
+            height: 500px;
+            border: 1px solid lightgray;
+            background-color: #f9f9f9;
+            margin-bottom: 20px;
+        }
+        #output {
+            width: 800px;
+            height: 150px;
+            font-family: monospace;
+        }
+        button { padding: 10px 20px; font-size: 16px; cursor: pointer; }
+    </style>
+</head>
+<body>
+
+    <h2>Draw a Weighted Tree</h2>
+    <p>Use the Edit buttons inside the canvas to add nodes and connect them.</p>
+
+    <div id="mynetwork"></div>
+
+    <button onclick="exportToNetworkX()">Export for NetworkX</button>
+    
+    <br>
+    <textarea id="output" readonly placeholder="JSON output will appear here..."></textarea>
+
+    <script type="text/javascript">
+        // 1. Initialize empty datasets for nodes and edges
+        // We start with a root node so the user has a starting point
+        var nodes = new vis.DataSet([{ id: 1, label: "Node 1" }]);
+        var edges = new vis.DataSet([]);
+        var nodeIdCounter = 2;
+
+        var container = document.getElementById('mynetwork');
+        var data = { nodes: nodes, edges: edges };
+
+        // 2. Configure the Network GUI
+        var options = {
+            manipulation: {
+                enabled: true,
+                initiallyActive: true,
+                // Override the default addNode to auto-increment IDs
+                addNode: function (nodeData, callback) {
+                    nodeData.id = nodeIdCounter++;
+                    nodeData.label = "Node " + nodeData.id;
+                    callback(nodeData);
+                },
+                // Override addEdge to prompt for a weight
+                addEdge: function (edgeData, callback) {
+                    if (edgeData.from === edgeData.to) {
+                        alert("Trees cannot have self-loops.");
+                        return;
+                    }
+                    
+                    var weightInput = prompt("Enter edge weight (e.g., length/distance):", "1.0");
+                    if (weightInput !== null && !isNaN(weightInput) && weightInput.trim() !== "") {
+                        edgeData.weight = parseFloat(weightInput);
+                        // Display the weight on the edge
+                        edgeData.label = weightInput; 
+                        callback(edgeData);
+                    } else {
+                        alert("Invalid weight. Edge creation canceled.");
+                    }
+                }
+            },
+            edges: {
+                arrows: { to: { enabled: false } }, // Undirected
+                smooth: false // Straight lines are better for trees
+            },
+            physics: {
+                enabled: true,
+                barnesHut: { springLength: 100 } // Keeps nodes spaced out
+            }
+        };
+
+        var network = new vis.Network(container, data, options);
+
+        // 3. Export Function (Generates the JSON)
+        function exportToNetworkX() {
+            var exportData = {
+                nodes: nodes.getIds(),
+                edges: edges.get().map(function(edge) {
+                    return {
+                        source: edge.from,
+                        target: edge.to,
+                        weight: edge.weight
+                    };
+                })
+            };
+            
+            var jsonString = JSON.stringify(exportData, null, 2);
+            document.getElementById('output').value = jsonString;
+        }
+    </script>
+</body>
+</html>
