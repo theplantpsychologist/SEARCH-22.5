@@ -615,6 +615,7 @@ py::tuple split_and_rebuild_cpp(
     // --- Step 2: Split Topology (Faces) ---
     std::vector<std::vector<int>> new_faces;
     std::map<int, std::vector<int>> old_face_map;
+    std::map<int, int> new_face_map;
 
     for (size_t f_idx = 0; f_idx < faces.size(); ++f_idx) {
         const auto& face_edges = faces[f_idx];
@@ -677,6 +678,7 @@ py::tuple split_and_rebuild_cpp(
             int new_f_idx = new_faces.size();
             new_faces.push_back(f_new);
             old_face_map[f_idx].push_back(new_f_idx);
+            new_face_map[new_f_idx] = (int)f_idx;
             continue;
         }
 
@@ -714,8 +716,10 @@ py::tuple split_and_rebuild_cpp(
 
         int idx_l = new_faces.size();
         new_faces.push_back(f_left);
+        new_face_map[idx_l] = (int)f_idx;
         int idx_r = new_faces.size();
         new_faces.push_back(f_right);
+        new_face_map[idx_r] = (int)f_idx;
         old_face_map[f_idx] = {idx_l, idx_r};
     }
 
@@ -814,7 +818,7 @@ py::tuple split_and_rebuild_cpp(
         }
     }
 
-    return py::make_tuple(new_edges, new_faces, new_instances);
+    return py::make_tuple(new_edges, new_faces, new_instances, py::cast(new_face_map));
 }
 
 

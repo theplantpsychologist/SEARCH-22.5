@@ -61,6 +61,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Polygon
 
 import networkx as nx
+from numpy import angle
 
 from src.engine.math225_core import (
     Fraction,
@@ -219,7 +220,7 @@ class Fold225:
         """
         Classifies vertices and identifies edge intersections.
         Returns:
-            vertex_sides: list of -1 (static), 0 (on line), 1 (moving)
+            vertex_sides: classifying current + old vertices into list of -1 (static), 0 (on line), 1 (moving)
             intersections: dict mapping old_edge_idx -> intersection_vertex_idx
             new_vertices: updated vertex list containing intersection points
         """
@@ -266,7 +267,7 @@ class Fold225:
         Slices the geometric topology and seamlessly reroutes the positional 
         instance connection map via the C++ engine.
         """
-        new_edges, new_faces, cpp_new_insts = split_and_rebuild_cpp(
+        new_edges, new_faces, cpp_new_insts, f_map = split_and_rebuild_cpp(
             self.edges, 
             self.faces, 
             self.cpp_instances(), 
@@ -283,7 +284,7 @@ class Fold225:
             for stack in cpp_new_insts
         ]
             
-        return new_edges, new_faces, new_instances
+        return new_edges, new_faces, new_instances, f_map
 
     def merge_heal(self, sides, v_flip_set):
         """
@@ -645,8 +646,9 @@ class Fold225:
         # Return ONLY the newly cloned off-hinge vertices for flipping.
         return set(v_map.values()), child_sides
 
+
     def fold_along_slice(
-        self, point: Vertex4D, angle: int, components_to_flip: str
+        self, point: Vertex4D, angle: int, components_to_flip: str, midpoints = True
     ) -> list["Fold225"]:
         """
         Generate children folds by slicing along a line and flipping connected components across
@@ -656,8 +658,20 @@ class Fold225:
 
         sides, inters, new_v = self.get_split_info(point, angle)
 
+        slice_vertices = {vert for v, vert in enumerate(self.vertices) if sides[v] == 0}
+        # indices of faces that can potentially be flipped (those that have vertices or midpoints on the slice line)
+        flippable_old_f = set()
+        for f_idx, face_edges in enumerate(self.faces):
+            for e_idx in face_edges:
+                v1, v2 = self.edges[e_idx]
+                vert1, vert2 = self.vertices[v1], self.vertices[v2]
+                if (vert1 in slice_vertices ) or (vert2 in slice_vertices) or (midpoints and (vert1 + vert2) * Fraction(1,2) in slice_vertices and vert1.angle_to(vert2)%8 == angle%8):
+                    flippable_old_f.add(f_idx)
+                    break
+
+
         # Slice the paper (Topological change only)
-        new_edges, new_faces, new_instances = self.split_and_rebuild(sides, inters)
+        new_edges, new_faces, new_instances, f_map = self.split_and_rebuild(sides, inters)
 
         sliced_fold = Fold225(
             vertices=new_v, edges=new_edges, faces=new_faces, instances=new_instances
@@ -704,6 +718,8 @@ class Fold225:
         if components_to_flip == "ONE":
             for component in connected_components:
                 # 1. Create the child state
+                if not any(f_map[f_idx] in flippable_old_f for f_idx, _ in component):
+                    continue
 
                 child_vertices = list(
                     sliced_fold.vertices
@@ -739,6 +755,7 @@ class Fold225:
                 children.append(flatten(child))
         return children
 
+
     def get_children(
         self, raycast=True, bp=False, midpoints=True, components_to_flip="ONE"
     ) -> dict:
@@ -759,7 +776,7 @@ class Fold225:
 
         children = set()
         for _, slice_ in enumerate(slices):
-            new_children = self.fold_along_slice(*slice_, components_to_flip)
+            new_children = self.fold_along_slice(*slice_, components_to_flip, midpoints=midpoints)
             for child in new_children:
                 canonical_child = canonicalize(child)
                 if (
@@ -843,7 +860,7 @@ class Fold225:
             )
 
             # Slicing creates new topology where faces are split along the 'hinge'
-            new_edges, new_faces, new_insts = current_fold.split_and_rebuild(sides, inters)
+            new_edges, new_faces, new_insts, f_map = current_fold.split_and_rebuild(sides, inters)
             current_fold = Fold225(new_v, new_edges, new_faces, new_insts)
 
         # --- 3. Component Analysis ---

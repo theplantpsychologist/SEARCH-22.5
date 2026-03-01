@@ -11,7 +11,7 @@ from tqdm import tqdm
 import os
 
 # Import the dimension from your build script
-from database.build_database import DIMENSION
+from database.build import DIMENSION
 
 class AncestryDataset(Dataset):
     def __init__(self, db_path='database/storage/database_3.db', num_gens=5):

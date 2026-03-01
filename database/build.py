@@ -11,7 +11,6 @@ import pstats
 from wakepy import keep
 import os
 import concurrent.futures
-from multiprocessing import Manager
 
 from sqlalchemy import asc, create_engine, Column, Integer, LargeBinary, ForeignKey, Float, BigInteger, Boolean, cast, desc, text, func
 from sqlalchemy.orm import declarative_base,sessionmaker
@@ -21,7 +20,7 @@ import networkx as nx
 import psutil
 import faiss
 
-from src.engine.fold225 import Fold225, ROOT, canonicalize, unfreeze, plot_multi_state_grid
+from src.engine.fold225 import ROOT, canonicalize, unfreeze, plot_multi_state_grid
 from src.engine.tree import extract_eigenvalues, random_tree, plot_trees
 
 
@@ -43,7 +42,7 @@ class State(Base):
     generation = Column(Integer, default=0)
     # metadata = Column(JSON, nullable=True)
 
-engine = create_engine('sqlite:///database/storage/database_3.db')
+engine = create_engine('sqlite:///database/storage/database_4.db')
 Base.metadata.create_all(engine)
 
 Session = sessionmaker(bind=engine)
@@ -56,6 +55,7 @@ index = faiss.IndexFlatL2(DIMENSION)
 
 # We need to map FAISS internal IDs (0, 1, 2...) back to your SQLite IDs
 faiss_to_db_id = []
+
 def sync_faiss_with_db():
     global index, faiss_to_db_id
     # Fetch states that aren't in the index yet
@@ -211,55 +211,15 @@ def main_parallel(time_limit=60, time_per_tree=10, tree_growth_rate = 1):
                     time.sleep(0.1)
 
 
-def view_best_matches(n=16, target_embedding=None ):
-    """
-    View the top n states in the database according to some criteria.
-    """
-    t0 = time.time()
-    best_states, distances = get_best_candidates(target_embedding, top_k=n)
-    tf = time.time()
-    folds = [unfreeze(np.frombuffer(state.binary_state, dtype=np.int16)) for state in best_states]
-    plot_multi_state_grid(folds, packing_instead_of_cp=True, labels = np.round(distances, decimals=3))
-    print(f"Plotted top {len(folds)} states. Best distance: {min(distances):.4f} | Search time: {tf - t0:.2f}s")
-    return best_states, distances
-
 def current_memory_usage():
     process = psutil.Process(os.getpid())
     mem_info = process.memory_info()
     return mem_info.rss
 
-def get_best_candidates(embedding=None, top_k=5):
-    # Only fetch ID and Embedding to save IO/RAM
-    query = (
-        session.query(State.id, State.embedding)
-        .filter(State.has_children == False)
-        .order_by(desc(
-            # State.layer_goodness * 0.5 +
-            State.tree_efficiency * (3.0 / func.sqrt(State.generation + 1))
-        ))
-    )
-    
-    if embedding is None:
-        results = query.limit(top_k).all()
-        # Return full objects for the dispatcher
-        return session.query(State).filter(State.id.in_([r.id for r in results])).all(), []
-
-    # If searching by embedding, fetch more IDs/Embeddings
-    candidates = query.limit(50000).all() 
-    
-    # Fast NumPy distance calculation on a pre-allocated array
-    candidate_embeddings = np.stack([np.frombuffer(c.embedding, dtype=np.float32) for c in candidates])
-    distances = np.linalg.norm(candidate_embeddings - embedding, axis=1)
-    
-    # Get top_k indices
-    top_indices = np.argsort(distances)[:top_k]
-    best_ids = [candidates[i].id for i in top_indices]
-    best_dists = [distances[i] for i in top_indices]
-    
-    # Fetch full objects ONLY for the winners
-    return session.query(State).filter(State.id.in_(best_ids)).all(), best_dists
-
 def get_best_candidates_faiss(target_embedding, top_k=5):
+    """
+    Search for promising parents. Can have different criteria besides just tree match
+    """
     # Ensure index is up to date
     sync_faiss_with_db()
     
@@ -289,83 +249,24 @@ def get_best_candidates_faiss(target_embedding, top_k=5):
             break
             
     return best_states, best_distances
-def find_closest_matches(tree, top_k=8):
-    """
-    Optimized: Uses FAISS to find the top_k closest matches across the ENTIRE database.
-    """
-    target_embedding = extract_eigenvalues(tree, dim=DIMENSION)
-    sync_faiss_with_db() # Ensure we are searching the latest data
-
-    if index.ntotal == 0:
-        return [], []
-
-    query_vec = np.array([target_embedding], dtype=np.float32).reshape(1, DIMENSION)
-    D, I = index.search(query_vec, top_k)
-
-    # Convert FAISS indices back to SQLite objects
-    db_ids = [faiss_to_db_id[idx] for idx in I[0] if idx != -1]
-    results = session.query(State).filter(State.id.in_(db_ids)).all()
-    
-    # Re-sort results to match FAISS distance order (SQL 'IN' doesn't preserve order)
-    id_to_dist = {faiss_to_db_id[idx]: dist for idx, dist in zip(I[0], D[0])}
-    results.sort(key=lambda x: id_to_dist.get(x.id, 999))
-
-    return results, [id_to_dist[r.id] for r in results]
 
 
-
-def view_sequence(state_id):
-    sequence = []
-    current_id = state_id
-    
-    while current_id is not None:
-        state = session.query(State).get(current_id)
-        sequence.append(state)
-        current_id = state.parent_id
-    
-    sequence = list(reversed(sequence))
-    folds = [unfreeze(np.frombuffer(state.binary_state, dtype=np.int16)) for state in sequence]
-    plot_multi_state_grid(folds, packing_instead_of_cp=True)
 
 if __name__ == "__main__":
     profiler = cProfile.Profile()
     profiler.enable()
 
-
-    sqrt2 = np.float32(np.sqrt(2))
-    test_tree = nx.Graph()
-    test_tree.add_weighted_edges_from([
-        (0, 1, 1.0), 
-        (0, 2, sqrt2 + 1), 
-        (0, 3, sqrt2 + 1),
-        (0, 4, sqrt2 + 1),
-        (0, 5, sqrt2 + 1),
-        (0, 6, sqrt2 + 1),
-        (0, 7, 1.0),
-        (0, 8, 1.0),
-        (1, 9, 1.0),
-    ], weight='length')
-
-
-
-    best_states, distances = view_best_matches(n=16, target_embedding=extract_eigenvalues(test_tree, dim=DIMENSION))
-    plot_trees([test_tree])
-    raise
-
-    print("===== Start Test =====")
-    size0 = session.query(State).count()
+    print("===== Start database build =====")
     t0 = time.time()
-
-
-
     size0 = session.query(State).count()
     print("Initial number of states in the database: ", size0)
 
-    binary_root = np.array(canonicalize(ROOT), dtype=np.int16).tobytes()
-    hashed_root = hash(binary_root)
-    root_id = session.query(State.id).filter_by(hashed_state=hashed_root).first()
+    # Initialize database if empty
+    if size0 == 0:
+        binary_root = np.array(canonicalize(ROOT), dtype=np.int16).tobytes()
+        hashed_root = hash(binary_root)
+        root_id = session.query(State.id).filter_by(hashed_state=hashed_root).first()
 
-    if root_id is None:
         tree,_ = ROOT.get_tree_and_packing()
         embedding = [0] * DIMENSION  
         tree_efficiency = sum(nx.get_edge_attributes(tree, 'length').values())
@@ -385,8 +286,7 @@ if __name__ == "__main__":
         print("Added root to database.")
         hot_sync_faiss()  # Sync FAISS after adding root
     
-
-
+    # Main
     main_parallel(time_limit=60 * 60 * 3, time_per_tree = 30, tree_growth_rate = 0.1)  
 
     profiler.disable()
@@ -398,12 +298,6 @@ if __name__ == "__main__":
     print("total number of states in the database: ", sizefinal)
     print(f"Added {sizefinal - size0} states in {time.time() - t0:.2f} seconds. Average states/s: {(sizefinal - size0) / (time.time() - t0):.2f}")
 
-    test_tree = random_tree(15)
-    best_states, distances = view_best_matches(n=16, target_embedding=extract_eigenvalues(test_tree, dim=DIMENSION))
-    plot_trees([test_tree])
-
-    view_sequence(best_states[0].id)
-
-    print("===== End Test =====")
+    print("===== End database build =====")
     
 
