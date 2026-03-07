@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import os
 from scipy.stats import linregress
 
-def generate_database_megaplot(db_path='database/storage/database_3.db', fig_dir="renders"):
+def generate_database_megaplot(db_path='database/storage/database_4.db', fig_dir="renders"):
     if not os.path.exists(fig_dir):
         os.makedirs(fig_dir)
 
@@ -108,7 +108,11 @@ def generate_database_megaplot(db_path='database/storage/database_3.db', fig_dir
 
     plt.suptitle(f"Database Analytics Megaplot: {os.path.basename(db_path)}", fontsize=22, y=0.98)
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    plt.savefig(os.path.join(fig_dir, "db_megaplot.png"), dpi=300)
+    renders_dir = "renders"
+    os.makedirs(renders_dir, exist_ok=True)
+    existing_files = [f for f in os.listdir(renders_dir) if f.endswith(".png")]
+    file_count = len(existing_files)
+    plt.savefig(os.path.join(renders_dir, f"db_megaplot_{file_count}.png"), dpi=300)
     print("Megaplot saved successfully.")
 
 if __name__ == "__main__":

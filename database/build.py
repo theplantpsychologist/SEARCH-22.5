@@ -129,6 +129,7 @@ def compute_children_task(parent_id, binary_parent, generation):
 def main_parallel(time_limit=60, time_per_tree=10, tree_growth_rate = 1):
     t0 = time.time()
     num_workers = os.cpu_count() - 2 
+    print(f"Using {num_workers} parallel cores.")
     
     with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
         futures = {}
@@ -137,7 +138,7 @@ def main_parallel(time_limit=60, time_per_tree=10, tree_growth_rate = 1):
         random_trees = []
         temp = t0 - time_per_tree
         distances = []
-        
+        gen4_done = False
         with keep.running():
             while time.time() - t0 < time_limit:
                 # 1. Keep FAISS fresh with any children added in the previous iteration
@@ -155,8 +156,38 @@ def main_parallel(time_limit=60, time_per_tree=10, tree_growth_rate = 1):
                         print(f"Total states: {session.query(State).count()} | Time elapsed: {time.time() - t0:.2f}s |  RAM usage: {current_memory_usage() / 1024 / 1024:.2f} MB")
 
                     # Find candidates that don't have children and aren't CURRENTLY being processed
-                    top_candidates, distances = get_best_candidates_faiss(target_embedding=target_embedding, top_k=num_workers * 2)
-                    
+                    if not gen4_done:
+                        session.commit()
+                        # 1. Strictly pull the youngest states first (Generations 0-3)
+                        remaining_early_gen = session.query(State).filter(
+                            State.has_children == False,
+                            State.generation < 5
+                        ).count()
+
+                        if remaining_early_gen == 0:
+                            gen4_done = True
+                            print("Confirmed: Gen 0-4 fully exhausted.")
+                        
+                        # Now pull what's actually available for workers
+                        top_candidates = session.query(State).filter(
+                            State.has_children == False,
+                            State.generation < 5,
+                            ~State.id.in_(processing_ids)
+                        ).order_by(asc(State.generation)).limit(num_workers * 5).all()
+
+                        # 2. Check if we actually found any early-gen states
+                        if not top_candidates:
+                            # If the query returns nothing, it means every state < Gen 4 has been expanded
+                            if len(processing_ids) == 0:
+                                gen4_done = True
+                                print(f"DATABASE MATURED: Generations 0-4 fully expanded, entire gen 5 is present. Switching to FAISS tree-guided building. Time elapsed: {time.time() - t0:.2f}s")
+                                # Re-run query without the < 4 filter to not waste this loop iteration
+                                top_candidates = session.query(State).filter_by(has_children=False).limit(num_workers * 5).all()
+                    else:
+                        # FAISS Logic: Pull the most promising candidates based on proximity to the current target embedding
+                        top_candidates, _ = get_best_candidates_faiss(target_embedding, top_k=num_workers * 2)
+
+
                     dispatched = 0
                     for candidate in top_candidates:
                         if candidate.id not in processing_ids:

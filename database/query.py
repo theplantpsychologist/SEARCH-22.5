@@ -93,37 +93,40 @@ if __name__ == "__main__":
 
 
     # Bird base or frog base
-    # sqrt2 = np.float32(np.sqrt(2))
-    # test_tree = nx.Graph()
-    # test_tree.add_weighted_edges_from([
-    #     (0, 1, 1.0), 
-    #     (0, 2, sqrt2 + 1), 
-    #     (0, 3, sqrt2 + 1),
-    #     (0, 4, sqrt2 + 1),
-    #     (0, 5, sqrt2 + 1),
+    sqrt2 = np.float32(np.sqrt(2))
+    test_tree = nx.Graph()
+    test_tree.add_weighted_edges_from([
+        (0, 1, 1.0), 
+        (0, 2, sqrt2 + 1), 
+        (0, 3, sqrt2 + 1),
+        (0, 4, sqrt2 + 1),
+        (0, 5, sqrt2 + 1),
 
-    #     # (0, 6, sqrt2 + 1),
-    #     # (0, 7, 1.0),
-    #     # (0, 8, 1.0),
-    #     # (1, 9, 1.0),
-    # ], weight='length')
-    # test_tree = random_tree(n=10)
+        # (0, 6, sqrt2 + 1),
+        # (0, 7, 1.0),
+        # (0, 8, 1.0),
+        # (1, 9, 1.0),
+    ], weight='length')
 
-    # best_states, distances = view_best_matches(n=16, target_embedding=extract_eigenvalues(test_tree, dim=DIMENSION))
-    # plot_trees([test_tree])
+    best_states, distances = view_best_matches(n=16, target_embedding=extract_eigenvalues(test_tree, dim=DIMENSION))
+    plot_trees([test_tree])
+
+    raise
 
     random_states = session.query(State)\
-        .filter(State.generation == 11)\
+        .filter(State.generation == 16)\
         .order_by(func.random())\
         .limit(16)\
         .all()
+    view_sequence(random_states[0].id)
+
+    
     folds = [unfreeze(np.frombuffer(state.binary_state, dtype=np.int16)) for state in random_states]
     # plot_multi_state_grid(folds, packing_instead_of_cp=True)
 
     target_embedding = np.frombuffer(random_states[0].embedding, dtype=np.float32)
     ancestors = ancestry_predictor.predict(target_embedding)
 
-    view_sequence(random_states[0].id)
     ancestor_matches = [random_states[0]]  # Start with the original state as the first "ancestor" for visualization
     for anc in ancestors:
         matches, distances = find_closest_matches(anc, top_k=1)
