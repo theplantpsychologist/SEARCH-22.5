@@ -1,0 +1,305 @@
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+import math
+import os
+
+from src.engine.math225_core import (
+    Fraction,
+    Vertex4D,
+    AplusBsqrt2,
+    reflect,
+    reflect_group,
+    canonicalize_cpp,
+    flatten_cpp,
+    split_and_rebuild_cpp
+)
+from src.engine.cp225 import Cp225
+from src.engine.fold225 import PLOT_COLORS
+
+# precomputed tan values
+TAN_225 = {
+    0: AplusBsqrt2(0, 0),  # tan( 0 *22.5)=0+0sqrt(2)
+    1: AplusBsqrt2(-1, 1),  # tan( 1 *22.5)=-1+1sqrt(2)
+    2: AplusBsqrt2(1, 0),  # tan( 2 *22.5)=1+0sqrt(2)
+    3: AplusBsqrt2(1, 1),  # tan( 3 *22.5)=1
+    # 4:                     vertical, tan is infinite
+    5: AplusBsqrt2(-1, -1),  # tan( 5 *22.5)=-(sqrt(2)+1)
+    6: AplusBsqrt2(-1, 0),  # -1
+    7: AplusBsqrt2(1, -1),  # 1-sqrt(2)
+}
+COT_225 = {
+    #0: vertical, infinite
+    1: AplusBsqrt2(1, 1),  
+    2: AplusBsqrt2(1, 0), 
+    3: AplusBsqrt2(-1, 1),  
+    4: AplusBsqrt2(0, 1), 
+    5: AplusBsqrt2(1, -1),  
+    6: AplusBsqrt2(-1, 0),  
+    7: AplusBsqrt2(-1, -1), 
+}
+
+#only defined for multiples of 45 because multiples of 22.5 break out of A+B*sqrt(2) form
+COS_225 = {
+    0: AplusBsqrt2(1, 0),
+    2: AplusBsqrt2(0, Fraction(1,2)),
+    4: AplusBsqrt2(0, 0),
+    6: AplusBsqrt2(0, -Fraction(1,2)),
+    8: AplusBsqrt2(-1, 0),
+    10: AplusBsqrt2(0, -Fraction(1,2)),
+    12: AplusBsqrt2(0, 0),
+    14: AplusBsqrt2(0, Fraction(1,2)),
+}
+SIN_225 = {
+    0: AplusBsqrt2(0, 0),
+    2: AplusBsqrt2(0, Fraction(1,2)),
+    4: AplusBsqrt2(1, 0),
+    6: AplusBsqrt2(0, Fraction(1,2)),
+    8: AplusBsqrt2(0, 0),
+    10: AplusBsqrt2(0, -Fraction(1,2)),
+    12: AplusBsqrt2(-1, 0),
+    14: AplusBsqrt2(0, -Fraction(1,2)),
+}
+
+class Tile:
+    """
+    Tile object: describes the outline of a molecule, with ridge and hinge positions implied. Lengths are default normalized so that the sum of lengths is 1. Defined by a list of edge lengths and the normal angle for each length (pointing away out of the tile), and a center point, scale, rotation, and flip to define the tile's geometric transformation. Rotation is defined such that 0 corresponds to the first having a normal angle of 0. Flip means go ccw if false, else cw
+    """
+    def __init__(self,lengths: list[AplusBsqrt2], angles: list[int], center: Vertex4D = Vertex4D(0,0,0,0), scale: AplusBsqrt2 = None, rotation: int = 0, flip: bool = False):
+        if len(lengths) != len(angles):
+            raise ValueError("Lengths and angles must have the same length")
+        self.n = len(lengths)
+        # if sum(angles) != 8 * (self.n - 2):
+        #     raise ValueError(f"Invalid sum of angles: {angles}")
+        perimeter = sum(lengths)
+        
+        self.lengths = [l / perimeter for l in lengths]  # Normalize lengths so that sum is 1
+        self.angles = angles
+        
+        self.center = center
+
+        if scale is None:
+            self.scale = 1  # Default scale to normalize perimeter to 1. or should it be perimeter?
+        else: 
+            self.scale = scale
+
+        self.rotation = rotation
+        self.flip = flip
+
+        #radius is scaled down to canonical size
+        self.radius = sum(self.lengths) / (2*sum([
+            TAN_225[(angles[i+1]-angles[i])//2] for i in range(self.n-1)
+            ] + [TAN_225[((angles[0]-angles[-1])//2)%8]]
+        ))
+        # denom = AplusBsqrt2(0,0)
+        # for i in range(self.n):
+        #     prev = (i - 1) % self.n
+        #     curr = i
+        #     nxt = (i + 1) % self.n
+            
+        #     # Angle between normal i-1 and normal i
+        #     delta_in = (self.angles[curr] - self.angles[prev]) % 16
+        #     # Angle between normal i and normal i+1
+        #     delta_out = (self.angles[nxt] - self.angles[curr]) % 16
+            
+        #     denom += TAN_225[delta_in // 2] + TAN_225[delta_out // 2]
+            
+        # self.radius = sum(self.lengths) / denom
+
+    def __hash__(self):
+        """
+        For dictionary lookup. In this context, we don't care about the tile's geometric transformation, just shape.
+        """
+        return hash(tuple(self.lengths + self.angles))
+    def __eq__(self, other):
+        pass
+
+
+class Tiling225:
+    """
+    Tiling object: describes a tiling. Defined by a list of tiles and their connectivity (adjacency list). The adjacency list contains a list for each tile, where the ith element in list j corresponds to the index of the tile that tile j is connected to via its ith edge. If there is no tile connected to tile j via its ith edge, the value is -1. Note that this implies that the number of edges for each tile must be the same as the length of its adjacency list.
+    """
+    def __init__(self,tiles: list[Tile]=[] , adjacencies: list[list[int]]= []):
+        self.tiles = tiles
+        self.adjacencies = adjacencies
+
+    def __str__(self):
+        s = "Tiling225:\n"
+        for i, tile in enumerate(self.tiles):
+            s += f"Tile {i}: lengths={[str(l) for l in tile.lengths]}, angles={tile.angles}, center={tile.center}, scale={tile.scale}, rotation={tile.rotation}, flip={tile.flip}\n"
+            s += f"  Adjacencies: {self.adjacencies[i]}\n"
+        return s
+
+
+def plot_tilings(tilings: list[Tiling225]):
+    """
+    Plot a list of tilings. For now, just print out the tile shapes and adjacencies.
+    Plot without hinges, just axial and ridges
+    """
+    n = len(tilings)
+    rows = math.ceil(math.sqrt(n / 2))
+    cols = math.ceil(n / rows)
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 5, rows * 5))
+    axes = axes.flatten() if n > 1 else [axes]
+    for i, tiling in enumerate(tilings):
+        ax = axes[i]
+        cp = tiling_to_cp(tiling)
+        for edge in cp.render():
+            l_type, x1, y1, x2, y2 = edge
+            # Assumes PLOT_COLORS exists in your namespace
+            ax.plot([x1, x2], [y1, y2], color=PLOT_COLORS[l_type], linewidth=3)
+
+        ax.set_aspect("equal")
+        ax.axis("off")
+
+
+
+    renders_dir = "renders"
+    os.makedirs(renders_dir, exist_ok=True)
+    existing_files = [f for f in os.listdir(renders_dir) if f.endswith(".png")]
+    file_count = len(existing_files)
+    filename = f"tilings_{file_count}.png"
+    filepath = os.path.join(renders_dir, filename)
+    plt.tight_layout(pad=0)
+    plt.savefig(filepath)
+    plt.close(fig)
+    print(f"Saved render to {filepath}")
+
+
+def tiling_to_cp(tiling: Tiling225) -> Cp225:
+    """
+    With flat foldable hinges. Can be converted into Fold225 afterwards.
+    """
+    vertices = []
+    edges = []
+    # basis vectors that become x and y in cartesian
+    X = Vertex4D(1,0,0,0)
+    Z = Vertex4D(0,0,1,0)
+    for t, tile in enumerate(tiling.tiles):
+        n = tile.n
+        r = tile.radius
+        s = tile.scale
+        sign = 1 if not tile.flip else -1
+
+        # External angles dictate how much we turn AFTER drawing an edge
+        # the ith angle is the angle between the ith and i+1th edge. Ignore the last one
+        turns = [tile.angles[i+1] - tile.angles[i] for i in range(n-1)]
+        sign = 1 if not tile.flip else -1
+        
+        start_offset = TAN_225[(tile.angles[1]-tile.angles[0]) // 2]
+        
+        current_heading = (tile.rotation + 4*sign) % 16
+
+        tile_vertices = [
+            tile.center + 
+            r*s* (X*COS_225[tile.rotation%16] + Z*SIN_225[tile.rotation%16]) +
+            r*s*start_offset* (X*COS_225[current_heading] + Z*SIN_225[current_heading])
+        ]
+        
+        # 3. Step through the edges
+        for i in range(n-1):
+            # Draw the current edge based on the current heading
+            current_heading = (current_heading + sign*turns[i]) % 16
+            
+            step_X = X * COS_225[current_heading]
+            step_Z = Z * SIN_225[current_heading]
+            
+            tile_vertices.append(tile_vertices[-1] + (tile.lengths[i] * s) * (step_X + step_Z))
+
+        tile_v = []
+        for vert in tile_vertices:
+            if not vert in vertices:
+                vertices.append(vert)
+                tile_v.append(len(vertices)-1)
+            else:
+                tile_v.append(vertices.index(vert))
+        for i,v_idx in enumerate(tile_v):
+            next_v = tile_v[(i+1)%len(tile_v)]
+            edge = (min(v_idx,next_v),max(v_idx,next_v),"b")
+            if edge in edges:
+                edges.remove(edge)
+                edges.append( (min(v_idx,next_v),max(v_idx,next_v),"ax") )
+            else:
+                edges.append(edge)
+        
+        #tile center should not be in vertices. if it is, something is wrong
+        vertices.append(tile.center)
+        c = len(vertices)-1
+        for v in tile_v:
+            edges.append( (min(v,c), max(v,c), "r") )
+
+    return Cp225(vertices=vertices, edges=edges)
+
+
+def plot_tiling_debug(tilings: list[Tiling225]):
+    """
+    Plots tilings with debug information: 
+    - Inscribed circles
+    - Tile centers
+    - Vertex indices for each tile
+    """
+    n = len(tilings)
+    rows = math.ceil(math.sqrt(n / 2))
+    cols = math.ceil(n / rows)
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 6, rows * 6))
+    axes = axes.flatten() if n > 1 else [axes]
+
+    for i, tiling in enumerate(tilings):
+        ax = axes[i]
+        
+        # 1. Generate and plot the standard CP edges
+        cp = tiling_to_cp(tiling)
+        for edge in cp.render():
+            l_type, x1, y1, x2, y2 = edge
+            ax.plot([x1, x2], [y1, y2], color=PLOT_COLORS.get(l_type, 'black'), linewidth=2, alpha=0.6)
+
+        # 2. Iterate through tiles to add geometric debug info
+        for t_idx, tile in enumerate(tiling.tiles):
+            cx, cy = tile.center.to_cartesian()
+            
+            # Draw the tile center
+            ax.scatter([cx], [cy], color='black', s=20, zorder=5)
+            ax.text(cx, cy, f" C{t_idx}", fontsize=9, verticalalignment='bottom')
+
+            # Draw the inscribed circle (radius needs to be scaled by tile.scale)
+            # tile.radius is the canonical radius, tile.scale is the transformation scale
+            r_val = float(tile.radius * tile.scale)
+            circle = patches.Circle((cx, cy), r_val, color='green', fill=False, linestyle='--', alpha=0.5)
+            ax.add_patch(circle)
+
+            # 3. Label vertex indices to check CCW/CW order
+            # We recreate the logic to find which vertices belong to this specific tile
+            # This helps verify if the vertices are where we expect them to be
+            temp_cp = tiling_to_cp(Tiling225(tiles=[tile], adjacencies=[[-1]*tile.n]))
+            for v_idx, vertex in enumerate(temp_cp.vertices):
+                # Skip labeling the center vertex (usually the last one added in tiling_to_cp)
+                if v_idx == len(temp_cp.vertices) - 1:
+                    continue
+                
+                vx, vy = vertex.to_cartesian()
+                ax.text(vx, vy, str(v_idx), color='blue', fontsize=10, 
+                        fontweight='bold', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'))
+
+        ax.set_aspect("equal")
+        ax.axis("on") # Keep axis on for coordinate debugging
+        ax.grid(True, linestyle=':', alpha=0.3)
+
+    renders_dir = "renders"
+    os.makedirs(renders_dir, exist_ok=True)
+    filename = f"debug_tiling_{len([f for f in os.listdir(renders_dir) if 'debug' in f])}.png"
+    filepath = os.path.join(renders_dir, filename)
+    plt.tight_layout()
+    plt.savefig(filepath)
+    plt.close(fig)
+    print(f"Saved debug render to {filepath}")
+
+if __name__ == "__main__":
+    # Example usage
+    square = Tile(lengths=[AplusBsqrt2(1,0), AplusBsqrt2(1,0), AplusBsqrt2(1,0), AplusBsqrt2(1,0)], angles=[0,4,8,12])
+    octagon = Tile(lengths = [AplusBsqrt2(1,0)]*8, angles=[0,2,4,6,8,10,12,14])
+
+    triangle = Tile(lengths=[AplusBsqrt2(1,0), AplusBsqrt2(0,1), AplusBsqrt2(1,0)], angles=[0,4,10], center = Vertex4D(0,0,Fraction(1,8),0),flip=True, rotation=2)
+    
+    tiling = Tiling225(tiles=[triangle], adjacencies=[[1,-1,-1,-1], [0,-1,-1], [0,-1,-1]])
+
+    # plot_tilings([tiling])
+    plot_tiling_debug([tiling])

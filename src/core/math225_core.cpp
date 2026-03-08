@@ -971,6 +971,8 @@ PYBIND11_MODULE(math225_core, m) {
             return "Fraction(" + std::to_string(f.num) + ", " + std::to_string(f.den) + ")";
         })
         .def("__str__", [](const Fraction& f) {
+            if (f.num == 0) return std::string("0");
+            if (f.den == 1) return std::to_string(f.num);
             return std::to_string(f.num) + "/" + std::to_string(f.den);
         });
 
@@ -981,6 +983,7 @@ PYBIND11_MODULE(math225_core, m) {
         .def_readwrite("A", &AplusBsqrt2::A)
         .def_readwrite("B", &AplusBsqrt2::B)
         .def(py::self + py::self)
+        // .def(py::self + int())
         .def(py::self - py::self)
         .def(py::self * py::self)
         .def(py::self / py::self)
@@ -1005,6 +1008,67 @@ PYBIND11_MODULE(math225_core, m) {
                 return py::cast(self * AplusBsqrt2(Fraction(other.cast<int64_t>(), 1)));
             }
             return py::reinterpret_borrow<py::object>(Py_NotImplemented); 
+        })
+        .def("__rmul__", [](const AplusBsqrt2& self, py::object other) -> py::object {
+            if (py::isinstance<AplusBsqrt2>(other)) {
+                return py::cast(other.cast<AplusBsqrt2>() * self);
+            } else if (py::isinstance<Fraction>(other)) {
+                return py::cast(AplusBsqrt2(other.cast<Fraction>()) * self);
+            } else if (py::isinstance<py::int_>(other)) {
+                return py::cast(AplusBsqrt2(Fraction(other.cast<int64_t>(), 1)) * self);
+            }
+            return py::reinterpret_borrow<py::object>(Py_NotImplemented);
+        })
+        .def("__add__", [](const AplusBsqrt2& self, py::object other) -> py::object {
+            if (py::isinstance<AplusBsqrt2>(other)) {
+                return py::cast(self + other.cast<AplusBsqrt2>());
+            } else if (py::isinstance<Fraction>(other)) {
+                return py::cast(self + AplusBsqrt2(other.cast<Fraction>()));
+            } else if (py::isinstance<py::int_>(other)) {
+                return py::cast(self + AplusBsqrt2(Fraction(other.cast<int64_t>(), 1)));
+            }
+            return py::reinterpret_borrow<py::object>(Py_NotImplemented);
+        })
+        .def("__radd__", [](const AplusBsqrt2& self, py::object other) -> py::object {
+            if (py::isinstance<AplusBsqrt2>(other)) {
+                return py::cast(other.cast<AplusBsqrt2>() + self);
+            } else if (py::isinstance<Fraction>(other)) {
+                return py::cast(AplusBsqrt2(other.cast<Fraction>()) + self);
+            } else if (py::isinstance<py::int_>(other)) {
+                return py::cast(AplusBsqrt2(Fraction(other.cast<int64_t>(), 1)) + self);
+            }
+            return py::reinterpret_borrow<py::object>(Py_NotImplemented);
+        })
+        .def("__truediv__", [](const AplusBsqrt2& self, py::object other) -> py::object {
+            if (py::isinstance<AplusBsqrt2>(other)) {
+                return py::cast(self / other.cast<AplusBsqrt2>());
+            } else if (py::isinstance<Fraction>(other)) {
+                return py::cast(self / AplusBsqrt2(other.cast<Fraction>()));
+            } else if (py::isinstance<py::int_>(other)) {
+                return py::cast(self / AplusBsqrt2(Fraction(other.cast<int64_t>(), 1)));
+            }
+            return py::reinterpret_borrow<py::object>(Py_NotImplemented);
+        })
+        .def("__rtruediv__", [](const AplusBsqrt2& self, py::object other) -> py::object {
+            if (py::isinstance<AplusBsqrt2>(other)) {
+                return py::cast(other.cast<AplusBsqrt2>() / self);
+            } else if (py::isinstance<Fraction>(other)) {
+                return py::cast(AplusBsqrt2(other.cast<Fraction>()) / self);
+            } else if (py::isinstance<py::int_>(other)) {
+                return py::cast(AplusBsqrt2(Fraction(other.cast<int64_t>(), 1)) / self);
+            }
+            return py::reinterpret_borrow<py::object>(Py_NotImplemented);
+        })
+        .def("__str__", [](const AplusBsqrt2& v) {
+            if (v.B == 0 && v.A == 0) return std::string("0");
+            
+            if (v.B == 0) {
+                return py::str(py::cast(v.A)).cast<std::string>();
+            } else if (v.A == 0) {
+                return "(" + py::str(py::cast(v.B)).cast<std::string>() + ")√2";
+            } 
+            return py::str(py::cast(v.A)).cast<std::string>() + " + (" + 
+                   py::str(py::cast(v.B)).cast<std::string>() + ")√2";
         });
 
     py::implicitly_convertible<Fraction, AplusBsqrt2>();
@@ -1021,6 +1085,10 @@ PYBIND11_MODULE(math225_core, m) {
         .def(py::self - py::self)
         .def("__mul__", [](const Vertex4D& self, const Fraction& f) { return self * f; })
         .def("__mul__", [](const Vertex4D& self, const AplusBsqrt2& a) { return self * a; })
+        
+        .def("__rmul__", [](const Vertex4D& self, const Fraction& f) { return self * f; })
+        .def("__rmul__", [](const Vertex4D& self, const AplusBsqrt2& a) { return self * a; })
+        
         .def("to_cartesian", &Vertex4D::to_cartesian)
         .def("dot_product", &Vertex4D::dot_product)
         .def("angle_to", &Vertex4D::angle_to)

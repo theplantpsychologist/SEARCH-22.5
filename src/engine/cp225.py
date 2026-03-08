@@ -25,8 +25,10 @@ class Cp225:
         self.faces = []  # List of faces, where each face is a list of vertex indices
         # self.vertex_neighbors = self.get_vertex_neighbors()  # List of tuples (other_vertex_index, angle_in_22.5_degrees, line_type)
 
-    def __repr__(self):
-        return f"Cp225 with {len(self.vertices)} vertices and {len(self.edges)} edges"
+    # def __repr__(self):
+    #     return f"Cp225 with {len(self.vertices)} vertices and {len(self.edges)} edges"
+    def __str__(self):
+        return f"Cp225, vertices: {self.vertices}\nedges:{self.edges}"
 
     # ============ Housekeeping methods ===========
 

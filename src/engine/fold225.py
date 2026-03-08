@@ -86,13 +86,13 @@ DIRECTIONS = [X, X + Y, Y, Y + Z, Z, Z + W, W, W - X]
 
 PLOT_COLORS = {
     "m": "purple",
-    "M": "purple",
     "v": "blue",
-    "V": "blue",
     "b": "black",
-    "A": "#42e7dc",
     "a": "#42e7dc",
-    "i": "grey",
+    "i": "grey", #invisible (for debugging)
+    "ax": "blue", # auxiliary
+    "r": "red", #ridge
+    "h": "grey" #hinge
 }
 
 
