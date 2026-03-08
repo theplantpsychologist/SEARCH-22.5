@@ -103,27 +103,21 @@ class Tile:
     """
     Tile object: describes the outline of a molecule, with ridge and hinge positions implied. Lengths are default normalized so that the sum of lengths is 1. Defined by a list of edge lengths and the normal angle for each length (pointing away out of the tile), and a center point, scale, rotation, and flip to define the tile's geometric transformation. Rotation is defined such that 0 corresponds to the first having a normal angle of 0. Flip means go ccw if false, else cw
     """
-    def __init__(self,lengths: list[AplusBsqrt2], angles: list[int], center: Vertex4D = Vertex4D(0,0,0,0), scale: AplusBsqrt2 = None, rotation: int = 0, flip: bool = False):
+    def __init__(self,lengths: list[AplusBsqrt2], angles: list[int], center: Vertex4D = Vertex4D(0,0,0,0), scale: AplusBsqrt2 = 1, rotation: int = 0, flip: bool = False):
         """
         Automatically canonicalize the lengths/angles, and store the scale rotation and flip to match the input
+        Transformation params scale, rotation, and flip: if not specified, we will default to 1, 0, and False. But if specified, we will update based on the canonicalization process.
         """
         if len(lengths) != len(angles):
             raise ValueError(f"Lengths and angles must have the same length: {len(lengths)} != {len(angles)}")
         self.n = len(lengths)
-        # if sum(angles) != 8 * (self.n - 2):
-        #     raise ValueError(f"Invalid sum of angles: {angles}")
-        perimeter = sum(lengths)
-        
-        self.lengths = [l / perimeter for l in lengths]  # Normalize lengths so that sum is 1
+
+        self.lengths = lengths
         self.angles = angles
         
         self.center = center
 
-        if scale is None:
-            self.scale = 1  # Default scale to normalize perimeter to 1. or should it be perimeter?
-        else: 
-            self.scale = scale
-
+        self.scale = scale
         self.rotation = rotation
         self.flip = flip
 
@@ -141,6 +135,77 @@ class Tile:
         return hash(tuple(self.lengths + self.angles))
     def __eq__(self, other):
         pass
+    def canonicalize(self,preserve_transformation = True):
+        lengths,angles, scale, rotation, flip = self.lengths, self.angles, self.scale, self.rotation, self.flip
+
+        perimeter = sum(lengths)
+        norm_lengths = [l / perimeter for l in lengths]
+
+        # 1. Evaluate all Forward Rotations
+        best_fwd_rot = 0 # index of first side
+        max_fwd_seq = norm_lengths
+        for i in range(1, self.n):
+            current = norm_lengths[i:] + norm_lengths[:i]
+            if current > max_fwd_seq:
+                max_fwd_seq = current
+                best_fwd_rot = i
+
+        # 2. Evaluate all Backward (Flipped) Rotations
+        # We reverse lengths and the "relative" order of angles
+        rev_lengths = norm_lengths[::-1]
+        rev_angles = angles[::-1]
+        
+        best_rev_rot = 0
+        max_rev_seq = rev_lengths
+        for i in range(1, self.n):
+            current = rev_lengths[i:] + rev_lengths[:i]
+            if current > max_rev_seq:
+                max_rev_seq = current
+                best_rev_rot = i
+
+        # 3. Canonical Selection
+        # Compare the best forward vs best reverse
+        if max_fwd_seq >= max_rev_seq:
+            self.lengths = max_fwd_seq
+            self.angles = angles[best_fwd_rot:] + angles[:best_fwd_rot]
+            # No change to flip orientation
+            internal_flip_offset = False 
+        else:
+            self.lengths = max_rev_seq
+            self.angles = rev_angles[best_rev_rot:] + rev_angles[:best_rev_rot]
+            # We are now using a reversed base representation
+            internal_flip_offset = True 
+    
+
+        self.radius = sum(self.lengths) / (2*sum([
+            TAN_225[(angles[i+1]-angles[i])//2] for i in range(self.n-1)
+            ] + [TAN_225[((angles[0]-angles[-1])//2)%8]]
+        ))
+
+        # return self
+        # 4. Normalize to Local Horizon
+    # We want the FIRST edge of the canonical tile to have normal = 0
+        angle_zero_offset = self.angles[0]
+        self.angles = [(a - angle_zero_offset) % 16 for a in self.angles]
+
+
+        # 6. Transformation Persistence
+        if not preserve_transformation:
+            self.scale, self.rotation, self.flip = AplusBsqrt2(1, 0), 0, False
+        else:
+            # If the tile was flipped internally, the global rotation 
+            # needs to be reflected to match the new 'handedness'
+            self.scale = self.scale * perimeter
+            self.flip = self.flip ^ internal_flip_offset
+            
+            if internal_flip_offset:
+                # If we flipped, the input rotation was relative to a CCW system,
+                # but our canonical base is now CW.
+                self.rotation = (angle_zero_offset - self.rotation) % 16
+            else:
+                self.rotation = (self.rotation - angle_zero_offset) % 16
+
+        return self
 
 one = AplusBsqrt2(1,0)
 # 16 unique convex molecules with one interior point
@@ -152,7 +217,7 @@ CORE_TILES = [
 
     Tile(lengths = [AplusBsqrt2(2,1),AplusBsqrt2(2,1),AplusBsqrt2(2,1),AplusBsqrt2(2,1),AplusBsqrt2(2,0),AplusBsqrt2(2,0),], angles = [0,4,6,10,12,14]),
     Tile(lengths = [AplusBsqrt2(2,1),AplusBsqrt2(2,Fraction(3,2)),AplusBsqrt2(1,Fraction(1,2)),one,one], angles = [0,6,10,12,14]),
-    Tile(lengths = [one,one,AplusBsqrt2(-2,2),one,one,AplusBsqrt2(-2,2)], angles = [0,4,6,8,12,14]),
+    Tile(lengths = [one,one,AplusBsqrt2(2,-1),one,one,AplusBsqrt2(2,-1)], angles = [0,4,6,8,12,14]),
     Tile(lengths = [AplusBsqrt2(2,1),AplusBsqrt2(2,1),AplusBsqrt2(1,Fraction(1,2)),AplusBsqrt2(1,Fraction(1,2)),one], angles = [0,6,8,12,14]),
 
     Tile(lengths = [AplusBsqrt2(2,2),AplusBsqrt2(2,2),AplusBsqrt2(2,1),AplusBsqrt2(2,0),AplusBsqrt2(2,1)], angles = [0,4,8,10,12]),
@@ -165,6 +230,7 @@ CORE_TILES = [
     Tile(lengths = [one,one,one,one], angles = [0,4,8,12]),
     Tile(lengths = [AplusBsqrt2(0,1),one,one], angles = [0,6,10]),
 ]
+CORE_TILES = [tile.canonicalize(preserve_transformation=True) for tile in CORE_TILES]
 
 class Tiling225:
     """

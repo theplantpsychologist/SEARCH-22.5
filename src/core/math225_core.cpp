@@ -103,9 +103,12 @@ struct AplusBsqrt2 {
     
     bool operator<(const AplusBsqrt2& o) const { return this->to_float() < o.to_float(); }
     bool operator>(const AplusBsqrt2& o) const { return this->to_float() > o.to_float(); }
+    bool operator<=(const AplusBsqrt2& o) const { return this->to_float() <= o.to_float(); }
+    bool operator>=(const AplusBsqrt2& o) const { return this->to_float() >= o.to_float(); }
     
     // Safety check relies on the new Overflow-Proof Fraction equality
     bool operator==(const AplusBsqrt2& o) const { return A == o.A && B == o.B; }
+    bool operator!=(const AplusBsqrt2& o) const { return !(*this == o); }
     
     AplusBsqrt2 operator-() const { return AplusBsqrt2(-A, -B); }
     double to_float() const { return A.to_float() + B.to_float() * 1.4142135623730951; }
@@ -988,8 +991,11 @@ PYBIND11_MODULE(math225_core, m) {
         .def(py::self * py::self)
         .def(py::self / py::self)
         .def(py::self == py::self)
+        .def(py::self != py::self)
         .def(py::self < py::self)
         .def(py::self > py::self)
+        .def(py::self <= py::self)
+        .def(py::self >= py::self)
         .def(-py::self)
         .def("sign", &AplusBsqrt2::sign)
         .def("__float__", &AplusBsqrt2::to_float)
