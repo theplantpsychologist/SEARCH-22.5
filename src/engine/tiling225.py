@@ -108,7 +108,7 @@ class Tile:
         Automatically canonicalize the lengths/angles, and store the scale rotation and flip to match the input
         """
         if len(lengths) != len(angles):
-            raise ValueError("Lengths and angles must have the same length")
+            raise ValueError(f"Lengths and angles must have the same length: {len(lengths)} != {len(angles)}")
         self.n = len(lengths)
         # if sum(angles) != 8 * (self.n - 2):
         #     raise ValueError(f"Invalid sum of angles: {angles}")
@@ -142,6 +142,29 @@ class Tile:
     def __eq__(self, other):
         pass
 
+one = AplusBsqrt2(1,0)
+# 16 unique convex molecules with one interior point
+CORE_TILES = [
+    Tile(lengths = [one,one,one,one,one,one,one,one], angles = [0,2,4,6,8,10,12,14]),
+    Tile(lengths = [AplusBsqrt2(1,Fraction(1,2)),AplusBsqrt2(1,Fraction(1,2)), one, one, one, one, one], angles = [0,4,6,8,10,12,14]),
+    Tile(lengths = [AplusBsqrt2(2,1),AplusBsqrt2(2,1),one,one,one,one], angles = [0,6,8,10,12,14]),
+    Tile(lengths = [AplusBsqrt2(2,2),AplusBsqrt2(2,1),AplusBsqrt2(2,0),AplusBsqrt2(2,0),AplusBsqrt2(2,0),AplusBsqrt2(2,1)], angles = [0,4,6,8,10,12]),
+
+    Tile(lengths = [AplusBsqrt2(2,1),AplusBsqrt2(2,1),AplusBsqrt2(2,1),AplusBsqrt2(2,1),AplusBsqrt2(2,0),AplusBsqrt2(2,0),], angles = [0,4,6,10,12,14]),
+    Tile(lengths = [AplusBsqrt2(2,1),AplusBsqrt2(2,Fraction(3,2)),AplusBsqrt2(1,Fraction(1,2)),one,one], angles = [0,6,10,12,14]),
+    Tile(lengths = [one,one,AplusBsqrt2(-2,2),one,one,AplusBsqrt2(-2,2)], angles = [0,4,6,8,12,14]),
+    Tile(lengths = [AplusBsqrt2(2,1),AplusBsqrt2(2,1),AplusBsqrt2(1,Fraction(1,2)),AplusBsqrt2(1,Fraction(1,2)),one], angles = [0,6,8,12,14]),
+
+    Tile(lengths = [AplusBsqrt2(2,2),AplusBsqrt2(2,2),AplusBsqrt2(2,1),AplusBsqrt2(2,0),AplusBsqrt2(2,1)], angles = [0,4,8,10,12]),
+    Tile(lengths = [AplusBsqrt2(6,4),AplusBsqrt2(4,2),AplusBsqrt2(2,0),AplusBsqrt2(4,2)], angles = [0,6,8,10]),
+    Tile(lengths = [AplusBsqrt2(2,2),AplusBsqrt2(2,1),AplusBsqrt2(2,1),AplusBsqrt2(2,1),AplusBsqrt2(2,1)], angles = [0,4,6,10,12]),
+    Tile(lengths = [AplusBsqrt2(4,2),AplusBsqrt2(4,3),AplusBsqrt2(2,2),AplusBsqrt2(2,1)], angles = [0,6,10,14]),
+    
+    Tile(lengths = [AplusBsqrt2(4,3),AplusBsqrt2(4,3),AplusBsqrt2(2,1),AplusBsqrt2(2,1)], angles = [0,6,10,12]),
+    Tile(lengths = [one,one,one,one], angles = [0,2,8,10]),
+    Tile(lengths = [one,one,one,one], angles = [0,4,8,12]),
+    Tile(lengths = [AplusBsqrt2(0,1),one,one], angles = [0,6,10]),
+]
 
 class Tiling225:
     """
@@ -161,11 +184,17 @@ class Tiling225:
     def join_tile(self, target_t, target_e, new_tile: Tile, new_e, new_flip = False):
         """
         Join a new tile to the tiling by connecting the new tile's new_e to the target tile's target_e
+
+        Does not mutate the input tile, but will mutate self.
         """
-        # Disregard the new_tiles' rotation flip and center. recalculate based on the target tile.
+
+        if self.adjacencies[target_t][target_e] != -1:
+            return None
+
+        # Disregard the new_tiles' rotation flip and center. recalculate based on the target tile.        
         target_tile = self.tiles[target_t]
-        target_length = target_tile.lengths[target_e]
-        new_s = target_length / new_tile.lengths[(new_e-1)%new_tile.n]
+        target_length = target_tile.lengths[target_e] * target_tile.scale
+        new_s = target_length / new_tile.lengths[new_e]
 
         new_rot = (target_tile.rotation + target_tile.angles[target_e] - new_tile.angles[new_e] + 8) % 16
 
@@ -198,6 +227,63 @@ class Tiling225:
         self.adjacencies[new_tile_index][new_e] = target_t
         self.adjacencies[target_t][target_e] = new_tile_index
 
+
+
+
+
+        # 1. Generate new tile geometry for intersection testing
+        # We use a standalone CP to get the exact vertices
+        new_cp = tiling_to_cp(Tiling225(tiles=[new_tile_copy], adjacencies=[[-1]*new_tile_copy.n]))
+        new_verts = new_cp.vertices[:new_tile_copy.n] # Polygon boundary only
+        
+        # Generate full tiling geometry for existing tiles
+        existing_cp = tiling_to_cp(self)
+        existing_verts = existing_cp.vertices
+
+        # 2. Check for Overlap (Point in Polygon)
+        # If any existing tile center is inside the new tile, or vice versa
+        for t in self.tiles:
+            if self._is_point_in_tile(t.center, new_verts):
+                return None # Overlap detected
+        
+        # 3. Detect Secondary Adjacencies (Cycle Closure)
+        # We look for edges in other tiles that match the new tile's edges
+        auto_adjacencies = [-1] * new_tile_copy.n
+        auto_adjacencies[new_e] = target_t # The primary connection
+
+        for e_idx in range(new_tile_copy.n):
+            if e_idx == new_e: continue
+            
+            v1_new = new_verts[e_idx]
+            v2_new = new_verts[(e_idx + 1) % new_tile_copy.n]
+            
+            # Search all existing edges in the tiling
+            for other_t_idx, other_tile in enumerate(self.tiles):
+                # Get geometry for just this 'other' tile
+                other_cp = tiling_to_cp(Tiling225(tiles=[other_tile], adjacencies=[[-1]*other_tile.n]))
+                other_verts = other_cp.vertices[:other_tile.n]
+                
+                for other_e_idx in range(other_tile.n):
+                    v1_old = other_verts[other_e_idx]
+                    v2_old = other_verts[(other_e_idx + 1) % other_tile.n]
+                    
+                    # Check if vertices match (allowing for flipped orientation)
+                    if (v1_new == v2_old and v2_new == v1_old):
+                        # Line up check: Adjacency found!
+                        auto_adjacencies[e_idx] = other_t_idx
+                        # Update the existing tile's adjacency as well
+                        self.adjacencies[other_t_idx][other_e_idx] = len(self.tiles)
+                    elif self._lines_intersect(v1_new, v2_new, v1_old, v2_old):
+                        # They touch but don't align perfectly (partial overlap/mismatch)
+                        return None 
+
+        # 4. Commit changes
+        new_tile_index = len(self.tiles)
+        self.tiles.append(new_tile_copy)
+        self.adjacencies.append(auto_adjacencies)
+        self.adjacencies[target_t][target_e] = new_tile_index
+        
+        return self
 
 
 
@@ -256,23 +342,17 @@ def tiling_to_cp(tiling: Tiling225) -> Cp225:
         start_offset = TAN_225[(tile.angles[1]-tile.angles[0]) // 2]
         
         current_heading = (tile.rotation + 4*sign) % 16
-
         tile_vertices = [
-            tile.center + 
-            r*s* (X*COS_225[tile.rotation%16] + Z*SIN_225[tile.rotation%16]) +
-            r*s*start_offset* (X*COS_225[current_heading] + Z*SIN_225[current_heading])
+            tile.center + r*s* rotate(X + Z*start_offset, tile.rotation)
         ]
         
         # 3. Step through the edges
-        for i in range(n-1):
+        for i in range(1,n):
             # Draw the current edge based on the current heading
-            current_heading = (current_heading + sign*turns[i]) % 16
+            current_heading = (current_heading + sign*turns[i-1]) % 16
             
-            step_X = X * COS_225[current_heading]
-            step_Z = Z * SIN_225[current_heading]
+            tile_vertices.append(tile_vertices[-1] + rotate(X * tile.lengths[i] * s, current_heading))
             
-            tile_vertices.append(tile_vertices[-1] + (tile.lengths[i] * s) * (step_X + step_Z))
-
         tile_v = []
         for vert in tile_vertices:
             if not vert in vertices:
@@ -399,12 +479,18 @@ def plot_tiling_debug(tilings: list[Tiling225]):
 
 if __name__ == "__main__":
     # Example usage
-    square = Tile(lengths=[AplusBsqrt2(1,0), AplusBsqrt2(1,0), AplusBsqrt2(1,0), AplusBsqrt2(1,0)], angles=[0,4,8,12])
+    # square = Tile(lengths=[AplusBsqrt2(1,0), AplusBsqrt2(1,0), AplusBsqrt2(1,0), AplusBsqrt2(1,0)], angles=[0,4,8,12])
 
-    triangle = Tile(lengths=[AplusBsqrt2(1,0), AplusBsqrt2(0,1), AplusBsqrt2(1,0)], angles=[0,4,10], center = Vertex4D(0,0,Fraction(1,8),0))
+    # triangle = Tile(lengths=[AplusBsqrt2(1,0), AplusBsqrt2(1,0), AplusBsqrt2(0,1)], angles=[0,4,10])
     
-    tiling = Tiling225(tiles=[square], adjacencies=[[-1,-1,-1,-1]])
-    tiling.join_tile(0,3, triangle, new_e = 2, new_flip = False)
+    # tiling = Tiling225(tiles=[square], adjacencies=[[-1,-1,-1,-1]])
+    # tiling.join_tile(0,0, triangle, new_e = 0)
+    # tiling.join_tile(1,1,square, new_e=1,)
+    # tiling.join_tile(2,2,triangle, new_e = 0)
+    # plot_tiling_debug([tiling])
+    
+    # plot_tiling_debug([Tiling225(tiles = [triangle], adjacencies = [])])
 
-    # plot_tilings([tiling])
-    plot_tiling_debug([tiling])
+    plot_tiling_debug([
+        Tiling225(tiles=[tile]) for tile in CORE_TILES
+    ])
