@@ -784,7 +784,8 @@ class Fold225:
                     and canonical_child not in children
                 ):
                     children.add(canonical_child)
-        return children
+        # return children
+        return {child:self for child in children}
 
     # ================= Visualization and evaluation ==================
     def render(self) -> list[list[list[float, float]]]:
@@ -1666,7 +1667,7 @@ class FoldEvolver:
                 parent_fold = unfreeze(frozen_parent)
                 # Generate children
                 children = parent_fold.get_children(
-                    raycast=True, bp=False, midpoints=False, components_to_flip="ONE"
+                    raycast=self.raycast, bp=self.bp, midpoints=self.midpoints, components_to_flip=self.components_to_flip
                 )
 
                 for frozen_child in children:
@@ -1733,6 +1734,137 @@ class FoldEvolver:
         return [unfreeze(f) for f, score in ranked[:top_n]]
     
 
+import json
+import os
+
+def janky_evolve_and_save(evolver, total_gens=4, filename="origami_tree.json"):
+    # Initialize the file with Gen 0
+    tree_data = {}
+    
+    # Process Gen 0 (Root)
+    root_frozen = canonicalize(evolver.root)
+    tree_data["gen_0"] = [serialize_state(evolver.root, None, 0, root_frozen)]
+    
+    # Save Gen 0 immediately
+    with open(filename, "w") as f:
+        json.dump(tree_data, f, indent=4)
+    print("--- Gen 0 Saved ---")
+
+    current_parents = [root_frozen]
+    seen_states = {root_frozen}
+
+    for g in range(1, total_gens + 1):
+        next_gen_frozen = []
+        gen_list_for_json = []
+        
+        print(f"Processing Gen {g}...")
+        
+        for parent_frozen in current_parents:
+            parent_fold = unfreeze(parent_frozen)
+            children = parent_fold.get_children(
+                raycast=evolver.raycast, 
+                bp=evolver.bp, 
+                midpoints=evolver.midpoints, 
+                components_to_flip=evolver.components_to_flip
+            )
+
+            for child_frozen in children:
+                if child_frozen not in seen_states:
+                    seen_states.add(child_frozen)
+                    next_gen_frozen.append(child_frozen)
+                    
+                    # Serialize and add to our temporary list
+                    child_fold = unfreeze(child_frozen)
+                    gen_list_for_json.append(
+                        serialize_state(child_fold, parent_frozen, g, child_frozen)
+                    )
+
+        # Update the main dict and overwrite the file
+        tree_data[f"gen_{g}"] = gen_list_for_json
+        with open(filename, "w") as f:
+            json.dump(tree_data, f, indent=4)
+            
+        # Prep for next generation
+        current_parents = next_gen_frozen
+        print(f"--- Gen {g} Saved ({len(gen_list_for_json)} states) ---")
+
+def serialize_state(fold_obj, parent_frozen, gen_idx, current_frozen):
+    """Helper to turn a Fold225 object into a JSON-friendly dict."""
+    rendered_faces, multiplicities = fold_obj.render()
+    cp = fold_to_cp(fold_obj)
+    
+    return {
+        "id": str(hash(current_frozen)),
+        "parent": str(hash(parent_frozen)) if parent_frozen else None,
+        "generation": gen_idx,
+        "goodness": fold_obj.goodness(),
+        "folded_faces": rendered_faces,
+        "multiplicities": multiplicities,
+        "cp_edges": cp.render()
+    }
+import json
+import random
+
+def random_walk_evolve_and_save(evolver, total_depth=20, filename="origami_path.json"):
+    """
+    Performs a random walk (Depth-First) through the folding tree.
+    In each step, it explores ALL children of ONE parent, saves them to JSON,
+    then picks ONE child to continue the path.
+    """
+    tree_data = {}
+    seen_states = set()
+
+    # Process Gen 0 (Root)
+    current_frozen_parent = canonicalize(evolver.root)
+    seen_states.add(current_frozen_parent)
+    
+    tree_data["gen_0"] = [serialize_state(evolver.root, None, 0, current_frozen_parent)]
+    
+    with open(filename, "w") as f:
+        json.dump(tree_data, f, indent=4)
+    
+    print(f"--- Gen 0 (Root) Saved ---")
+
+    for g in range(1, total_depth + 1):
+        gen_list_for_json = []
+        
+        # Unfreeze the single parent we chose from the last generation
+        parent_fold = unfreeze(current_frozen_parent)
+        
+        # Generate ALL possible children for this parent
+        children = parent_fold.get_children(
+            raycast=evolver.raycast, 
+            bp=evolver.bp, 
+            midpoints=evolver.midpoints, 
+            components_to_flip=evolver.components_to_flip
+        )
+
+        # Filter out states we've seen on this path (to avoid loops/backtracking)
+        new_children = [c for c in children if c not in seen_states]
+
+        if not new_children:
+            print(f"Dead end reached at generation {g-1}. No new children found.")
+            break
+
+        # Serialize ALL children of this parent for the JSON
+        # This allows the Manim script to show the 'local neighborhood' of the path
+        for child_frozen in new_children:
+            child_fold = unfreeze(child_frozen)
+            gen_list_for_json.append(
+                serialize_state(child_fold, current_frozen_parent, g, child_frozen)
+            )
+
+        # Update JSON
+        tree_data[f"gen_{g}"] = gen_list_for_json
+        with open(filename, "w") as f:
+            json.dump(tree_data, f, indent=4)
+
+        # --- THE DEPTH-FIRST CHOICE ---
+        # Pick exactly ONE child to be the parent for the next generation
+        current_frozen_parent = random.choice(new_children)
+        seen_states.add(current_frozen_parent)
+        
+        print(f"--- Gen {g} Saved ({len(new_children)} sibling states). Path continues... ---")
 BOUNDARY_CORNERS = {
     Vertex4D(-1, 0, -1, 0),
     Vertex4D(1, 0, -1, 0),
@@ -1757,29 +1889,26 @@ if __name__ == "__main__":
 
     print("===== Start Test =====")
     
-    evolver = FoldEvolver(ROOT)
-    # Gen 2 : evolve everyone
-    evolver.evolve()
-    frozen = evolver.family_tree
-    unfrozen = [unfreeze(f) for f in frozen]
-    plot_multiple(unfrozen)
+    evolver = FoldEvolver(ROOT, midpoints=False)
+    
+    # This will build and save gen-by-gen
+    random_walk_evolve_and_save(evolver, total_depth=9)
 
-    # Gen 3: Only 50% move on to the next gen, based on goodness ranking
-    evolver.evolve(num_generations=1, select_percent=0.5)
+    # evolver = FoldEvolver(ROOT, raycast=True, bp=False, midpoints=True, components_to_flip="ONE")
+    # # Gen 2 : evolve everyone
+    # evolver.evolve()
+    # frozen = evolver.family_tree
+    # unfrozen = [unfreeze(f) for f in frozen]
+    # plot_multiple(unfrozen)
 
-    # Gen 4: Only 30% move on
-    evolver.evolve(num_generations=1, select_n=300)
+    # # Gen 3: Only 50% move on to the next gen, based on goodness ranking
+    # evolver.evolve()
+    # print(f"Family tree size after Gen 3: {len(evolver.family_tree)}")
 
-    # Gen 5: Only 10% move on
-    # evolver.evolve(num_generations=1, select_n=300)
-
-    # Plot final results
-    # top_folds = evolver.get_top_folds(100)
-    # plot_multi_state_grid(folds=top_folds)
 
     profiler.disable()
     stats = pstats.Stats(profiler)
     stats.sort_stats("cumulative")  # Sort by cumulative time
-    stats.print_stats(20)  # Print the top  functions
+    # stats.print_stats(20)  # Print the top  functions
 
     print("===== End Test =====")
