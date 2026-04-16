@@ -13,6 +13,8 @@ from ladybug_geometry_polyskel.polyskel import skeleton_as_edge_list
 # GEOMETRY HELPERS
 # =============================================================================
 
+random.seed(42)
+
 def get_dir(p1, p2):
     dx, dy = p2[0] - p1[0], p2[1] - p1[1]
     g = math.gcd(abs(dx), abs(dy))
@@ -229,6 +231,8 @@ def get_polytope(G, nodes, pos, basis, eps=0.1):
             row[j] = np.dot(basis[2*idx_v:2*idx_v+2, j] - basis[2*idx_u:2*idx_u+2, j], unit)
         M.append(-row); b.append(L0 - eps)
     return np.array(M), np.array(b)
+
+
 # =============================================================================
 # STRAIGHT SKELETON (Using Ladybug-Geometry-Polyskel)
 # =============================================================================
@@ -316,4 +320,4 @@ def run_constrained_gui(width=6, target_faces=12, symmetric=True, use_bounds=Tru
 
     update(0); plt.show()
 if __name__ == "__main__":
-    run_constrained_gui(width=7, target_faces=30, symmetric=False, use_bounds=True)
+    run_constrained_gui(width=7, target_faces=30, symmetric=True, use_bounds=True)

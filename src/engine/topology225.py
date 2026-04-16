@@ -11,108 +11,108 @@ import itertools
 from z3 import BoolVal, Solver, Bool, And, Or, Not, If, sat, Implies
 import cProfile
 import pstats
-class Vertex:
-    def __init__(self, x, y):
-        self.x = float(x)
-        self.y = float(y)
-        # Pointer to one outgoing half-edge
-        self.incident_edge = None
+# class Vertex:
+#     def __init__(self, x, y):
+#         self.x = float(x)
+#         self.y = float(y)
+#         # Pointer to one outgoing half-edge
+#         self.incident_edge = None
 
-    def coords(self):
-        return (self.x, self.y)
+#     def coords(self):
+#         return (self.x, self.y)
 
-class Face:
-    def __init__(self):
-        # Pointer to one half-edge on the boundary
-        self.incident_edge = None
+# class Face:
+#     def __init__(self):
+#         # Pointer to one half-edge on the boundary
+#         self.incident_edge = None
 
-class HalfEdge:
-    def __init__(self):
-        self.origin = None
-        self.twin = None
-        self.next = None
-        self.prev = None
-        self.face = None
+# class HalfEdge:
+#     def __init__(self):
+#         self.origin = None
+#         self.twin = None
+#         self.next = None
+#         self.prev = None
+#         self.face = None
 
 
-class Tiling225:
-    def __init__(self):
-        self.vertices = []
-        self.half_edges = []
-        self.faces = []
+# class Tiling225:
+#     def __init__(self):
+#         self.vertices = []
+#         self.half_edges = []
+#         self.faces = []
 
-    def create_vertex(self, x, y):
-        v = Vertex(x, y)
-        self.vertices.append(v)
-        return v
+#     def create_vertex(self, x, y):
+#         v = Vertex(x, y)
+#         self.vertices.append(v)
+#         return v
 
-    def create_face(self):
-        f = Face()
-        self.faces.append(f)
-        return f
+#     def create_face(self):
+#         f = Face()
+#         self.faces.append(f)
+#         return f
 
-    def create_edge_pair(self, v1, v2, face_left=None, face_right=None):
-        """Creates a twin pair of half-edges between two vertices."""
-        e1 = HalfEdge()
-        e2 = HalfEdge()
+#     def create_edge_pair(self, v1, v2, face_left=None, face_right=None):
+#         """Creates a twin pair of half-edges between two vertices."""
+#         e1 = HalfEdge()
+#         e2 = HalfEdge()
 
-        e1.origin = v1
-        e2.origin = v2
+#         e1.origin = v1
+#         e2.origin = v2
         
-        e1.twin = e2
-        e2.twin = e1
+#         e1.twin = e2
+#         e2.twin = e1
 
-        e1.face = face_left
-        e2.face = face_right
+#         e1.face = face_left
+#         e2.face = face_right
 
-        v1.incident_edge = e1
-        v2.incident_edge = e2
+#         v1.incident_edge = e1
+#         v2.incident_edge = e2
 
-        self.half_edges.extend([e1, e2])
-        return e1, e2
+#         self.half_edges.extend([e1, e2])
+#         return e1, e2
 
-    def merge_vertices(self, v_from, v_to):
-        """
-        Merges v_from into v_to. 
-        All edges originating at v_from are redirected to originate at v_to.
-        """
-        if v_from == v_to:
-            return
+#     def merge_vertices(self, v_from, v_to):
+#         """
+#         Merges v_from into v_to. 
+#         All edges originating at v_from are redirected to originate at v_to.
+#         """
+#         if v_from == v_to:
+#             return
 
-        # 1. Identify all half-edges originating at v_from
-        edges_to_move = [e for e in self.half_edges if e.origin == v_from]
+#         # 1. Identify all half-edges originating at v_from
+#         edges_to_move = [e for e in self.half_edges if e.origin == v_from]
 
-        for e in edges_to_move:
-            # Redirect the origin
-            e.origin = v_to
+#         for e in edges_to_move:
+#             # Redirect the origin
+#             e.origin = v_to
             
-            # Check if this merge created a 'zero-length' edge
-            # This happens if the edge now points from v_to to v_to
-            if e.twin.origin == v_to:
-                self._collapse_degenerate_edge(e)
+#             # Check if this merge created a 'zero-length' edge
+#             # This happens if the edge now points from v_to to v_to
+#             if e.twin.origin == v_to:
+#                 self._collapse_degenerate_edge(e)
 
-        # 2. Update v_to's incident edge if necessary
-        if edges_to_move:
-            v_to.incident_edge = edges_to_move[0]
+#         # 2. Update v_to's incident edge if necessary
+#         if edges_to_move:
+#             v_to.incident_edge = edges_to_move[0]
 
-        # 3. Remove v_from from the tiling
-        if v_from in self.vertices:
-            self.vertices.remove(v_from)
+#         # 3. Remove v_from from the tiling
+#         if v_from in self.vertices:
+#             self.vertices.remove(v_from)
 
-    def _collapse_degenerate_edge(self, e):
-        """Handles the removal of an edge that has been compressed to a point."""
-        twin = e.twin
+#     def _collapse_degenerate_edge(self, e):
+#         """Handles the removal of an edge that has been compressed to a point."""
+#         twin = e.twin
         
-        # Patch the circular loop (next/prev pointers)
-        if e.prev: e.prev.next = e.next
-        if e.next: e.next.prev = e.prev
+#         # Patch the circular loop (next/prev pointers)
+#         if e.prev: e.prev.next = e.next
+#         if e.next: e.next.prev = e.prev
         
-        if twin.prev: twin.prev.next = twin.next
-        if twin.next: twin.next.prev = twin.prev
+#         if twin.prev: twin.prev.next = twin.next
+#         if twin.next: twin.next.prev = twin.prev
 
-        # Remove the edges from the master list
-        if e in self.half_edges: self.half_edges.remove(e)
-        if twin in self.half_edges: self.half_edges.remove(twin)
+#         # Remove the edges from the master list
+#         if e in self.half_edges: self.half_edges.remove(e)
+#         if twin in self.half_edges: self.half_edges.remove(twin)
     
 # =============================================================================
 # 1. GEOMETRY & SYMMETRY HELPERS (D4 Group)
@@ -371,7 +371,7 @@ def enumerate_graphs(N=3, symmetry='none'):
 # 4. BATCH PLOTTING
 # =============================================================================
 
-def plot_multiple_graphs(graphs, filename="tilings.png"):
+def plot_multiple_graphs(graphs, filename="renders/tilings.png", labels = []):
     if not graphs:
         print("No graphs to plot.")
         return
@@ -395,6 +395,8 @@ def plot_multiple_graphs(graphs, filename="tilings.png"):
                 ax.plot(x, y, 'ko', markersize=3)
             ax.set_aspect('equal')
         ax.axis('off')
+        if labels and i < len(labels):
+            ax.set_title(f"Index: {labels[i]}", fontsize=10)
 
     plt.tight_layout()
     plt.savefig(filename, dpi=200)

@@ -82,7 +82,9 @@ def decompress_edges(binary_blob, N):
     return edges
 
 
-def extract_topology(state_id,db_name='topologies.db', N = 4):
+def extract_topology(state_id,db_name=None, N = 4):
+    if db_name is None:
+        db_name = f'topologies_{N}_diag.db' # Default to diagonal symmetry for extraction
     engine = create_engine(f'sqlite:///database/tilings/storage/{db_name}')
     Session = sessionmaker(bind=engine)
     session = Session()
@@ -93,7 +95,15 @@ def extract_topology(state_id,db_name='topologies.db', N = 4):
         return None
     
     edges = decompress_edges(state.binary_state, N=N)
-    return edges
+
+    G = nx.Graph()
+    G.add_edges_from(edges)
+    
+    # 3. FIX: Manually re-assign the 'pos' attribute to every node
+    # This tells the plotter that node (x, y) is located at (x, y)
+    pos = {node: node for node in G.nodes()}
+    nx.set_node_attributes(G, pos, 'pos')
+    return G
 
 # =============================================================================
 # MULTIPROCESSING: Z3 WORKER
