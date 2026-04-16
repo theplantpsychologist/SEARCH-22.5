@@ -8,10 +8,12 @@ from wakepy import keep
 
 from sqlalchemy import create_engine, Column, Integer, LargeBinary, Boolean, String, text
 from sqlalchemy.orm import declarative_base, sessionmaker
-import networkx as nx
-from z3 import Solver, Bool, And, Or, Not, If, Implies, BoolVal, sat
+from sqlalchemy.dialects.sqlite import insert
 
-from src.engine.tiling225 import apply_transform, is_valid_tiling_global, lex_le
+import networkx as nx
+from z3 import Solver, Bool, And, Or, Not, If, Implies, BoolVal, sat, is_true
+
+from engine.topology225 import apply_transform, is_valid_tiling_global, lex_le, plot_multiple_graphs
 
 Base = declarative_base()
 
@@ -29,8 +31,7 @@ class State(Base):
     __tablename__ = 'states'
     id = Column(Integer, primary_key=True)
     prefix_id = Column(Integer) 
-    binary_state = Column(LargeBinary, nullable=False)
-
+    binary_state = Column(LargeBinary, nullable=False, unique=True) # <--- ADDED unique=True
 # =============================================================================
 # BINARY COMPRESSION & EDGE UTILS
 # =============================================================================
@@ -78,6 +79,20 @@ def decompress_edges(binary_blob, N):
             edges.append(ordered_edges[i])
             
     edges.extend(get_boundary_edges(N))
+    return edges
+
+
+def extract_topology(state_id,db_name='topologies.db', N = 4):
+    engine = create_engine(f'sqlite:///database/tilings/storage/{db_name}')
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    
+    state = session.query(State).filter_by(id=state_id).first()
+    if not state:
+        print(f"No state found with ID {state_id}")
+        return None
+    
+    edges = decompress_edges(state.binary_state, N=N)
     return edges
 
 # =============================================================================
@@ -156,30 +171,45 @@ def z3_worker(task_queue, result_queue, N, symmetry):
                 re = tuple(sorted((tu, tv)))
                 transformed_vars.append(edge_vars[re] if re in edge_vars else BoolVal(True))
             s.add(lex_le(base_vars, transformed_vars))
-
+        
         # 4. SOLVE AND COMPRESS
-        all_vars = list(edge_vars.values())
         found_states = []
+        models_checked = 0
+        BATCH_SIZE = 50  # Flush to database frequently
         
         while s.check() == sat:
             model = s.model()
-            current_internal = []
+            models_checked += 1
+            
+            current_active = []
             block_clause = []
             
-            for e, var in zip(ordered_edges, all_vars):
-                is_active = bool(model.evaluate(var, model_completion=True))
-                if is_active: current_internal.append(e)
-                block_clause.append(var != is_active)
-                    
+            # FIX: Safely unpack both the edge tuple (e) and the Z3 variable (v)
+            for e, v in edge_vars.items():
+                is_active = is_true(model.evaluate(v, model_completion=True))
+                if is_active:
+                    current_active.append(e)
+                
+                # Optimized Blocking: Add to the block list
+                block_clause.append(v != is_active)
+            
+            # Apply the blocking clause for the next iteration
             s.add(Or(*block_clause))
             
-            # Global Filter (Unique Normals)
-            if is_valid_tiling_global(current_internal + boundary_edges):
-                compressed_blob = compress_edges(current_internal, ordered_edges)
-                found_states.append(compressed_blob)
+            # Global Filter
+            if is_valid_tiling_global(current_active + boundary_edges):
+                found_states.append(compress_edges(current_active, ordered_edges))
                 
-        result_queue.put((prefix_id, found_states))
-
+            # --- Intra-prefix batching and progress printouts ---
+            if models_checked % 500 == 0:
+                print(f"[Worker] Prefix {prefix_id} active... {models_checked} Z3 states evaluated.")
+                
+            if len(found_states) >= BATCH_SIZE:
+                result_queue.put((prefix_id, found_states, False)) # False = prefix not done yet
+                found_states = []
+                
+        # Send any remaining states and signal that this prefix is COMPLETE
+        result_queue.put((prefix_id, found_states, True))
 # =============================================================================
 # MULTIPROCESSING: DATABASE WRITER
 # =============================================================================
@@ -196,21 +226,25 @@ def db_writer(db_uri, result_queue, total_prefixes):
         res = result_queue.get()
         if res is None: break # Poison pill
         
-        prefix_id, states = res
+        # Unpack the new 3-part message
+        prefix_id, states, is_complete = res
         
-        # Bulk save newly discovered topologies
+        # 1. Bulk save NEWLY discovered topologies incrementally
         if states:
-            objects = [State(prefix_id=prefix_id, binary_state=s) for s in states]
-            session.bulk_save_objects(objects)
+            # Use SQLite's INSERT OR IGNORE to prevent duplicates if a prefix is restarted
+            stmt = insert(State).values([{"prefix_id": prefix_id, "binary_state": s} for s in states])
+            stmt = stmt.on_conflict_do_nothing(index_elements=['binary_state'])
+            session.execute(stmt)
+            session.commit() # Safely committed to disk immediately!
             
-        # Mark Prefix as done
-        session.query(Prefix).filter_by(id=prefix_id).update({"is_done": True})
-        session.commit()
-        
-        processed += 1
-        elapsed = time.time() - t_start
-        print(f"Progress: [{processed}/{total_prefixes}] Prefixes | Found {len(states)} in this block | Time: {elapsed:.1f}s")
-
+        # 2. Mark Prefix as done ONLY when the worker signals it has exhausted the prefix
+        if is_complete:
+            session.query(Prefix).filter_by(id=prefix_id).update({"is_done": True})
+            session.commit()
+            
+            processed += 1
+            elapsed = time.time() - t_start
+            print(f">>> [DB Writer] Progress: [{processed}/{total_prefixes}] Prefixes Exhausted | Time: {elapsed:.1f}s")
 # =============================================================================
 # MAIN ORCHESTRATOR
 # =============================================================================
@@ -218,6 +252,7 @@ def db_writer(db_uri, result_queue, total_prefixes):
 if __name__ == "__main__":
     mp.freeze_support() # Safe execution on Windows
     
+
     # --- CONFIGURATION ---
     N = 4
     symmetry = "none"
@@ -232,6 +267,39 @@ if __name__ == "__main__":
     session = Session()
     session.execute(text("PRAGMA journal_mode=WAL;"))
     session.execute(text("PRAGMA synchronous=NORMAL;")) # Speeds up WAL writing
+
+
+
+    #  Extract 100 random states and render them
+    print("Extracting 100 random states for visualization...")
+    all_states = session.query(State).all()
+    if len(all_states) >= 100:
+        import random
+        random_states = random.sample(all_states, 100)
+    else:
+        random_states = all_states
+    
+    graphs = []
+    for state in random_states:
+        # 1. Reconstruct edge list from the compressed binary blob
+        edges = decompress_edges(state.binary_state, N)
+        
+        # 2. Create the graph object
+        G = nx.Graph()
+        G.add_edges_from(edges)
+        
+        # 3. FIX: Manually re-assign the 'pos' attribute to every node
+        # This tells the plotter that node (x, y) is located at (x, y)
+        pos = {node: node for node in G.nodes()}
+        nx.set_node_attributes(G, pos, 'pos')
+        
+        graphs.append(G)
+    
+    print(f"Rendering {len(graphs)} graphs...")
+    plot_multiple_graphs(graphs, filename = f"renders/db_sample_n{N}_{symmetry}.png")
+    breakpoint()
+
+
     
     with keep.running():
         print("===== Start Database Build =====")
@@ -288,3 +356,5 @@ if __name__ == "__main__":
         final_count = session.query(State).count()
         print("===== End Database Build =====")
         print(f"Total Unique Topologies Generated: {final_count}")
+        
+
