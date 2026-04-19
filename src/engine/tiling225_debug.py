@@ -199,7 +199,6 @@ def build_boundary_constraints(nodes, n2i, N):
         
     return np.array(M), np.array(b)
 
-
 def build_equidistant_for_edges(edges, pos, n2i):
     """Calculates constraints only if P is in the deep interior for all edges."""
     k = len(edges)
@@ -221,17 +220,17 @@ def build_equidistant_for_edges(edges, pos, n2i):
     Px, Py, r_ls = xi[0], xi[1], xi[2]
     
     # 2. Check individual signed distances for ALL edges
-    # d_i = nx * Px + ny * Py - eta_i
     all_negative = True
     for i in range(k):
         nx, ny = A[i, 0], A[i, 1]
         dist = nx * Px + ny * Py - eta_init[i]
-        if dist >= -1e-7: # Small epsilon for float safety
+        if dist >= -1e-7: 
             all_negative = False
             break
             
+    # NEW: Return 5 Nones if invalid
     if not all_negative:
-        return None, None, None, None
+        return None, None, None, None, None
 
     # 3. If valid, proceed with left null space
     W = null_space(A.T)
@@ -250,7 +249,10 @@ def build_equidistant_for_edges(edges, pos, n2i):
         M_edges.append(row)
         b_edges.append(0)
         
-    return np.array(M_edges), np.array(b_edges), error, r_ls
+    # NEW: Return the center coordinates as the 5th variable
+    return np.array(M_edges), np.array(b_edges), error, r_ls, (Px, Py)
+
+
 def get_reflex_edge_pairs(face, pos):
     """Returns edge pairs forming a reflex (concave) angle. Handles both CCW and CW face loops."""
     k = len(face)
@@ -298,8 +300,7 @@ def solve_absolute_positions(G_in, symmetry='none', N=4):
     
     M = np.vstack([M_ang, M_sym, M_bnd]) if M_sym.size else np.vstack([M_ang, M_bnd])
     b = np.concatenate([b_ang, b_sym, b_bnd]) if b_sym.size else np.concatenate([b_ang, b_bnd])
-    
-# =========================================================================
+    # =========================================================================
     # 3. REFINED EQUIDISTANT INJECTION
     # =========================================================================
     faces = extract_oriented_faces(G, pos_init)
@@ -308,27 +309,30 @@ def solve_absolute_positions(G_in, symmetry='none', N=4):
     candidate_constraints_concave = []
     candidate_constraints_convex = []
     
-    # A. Harvest and Filter for Negative Signed Distance
     for face in faces:
-        # if len(face) < 4: continue
         k = len(face)
         if k < 4: continue
         face_edges = [(face[i], face[(i+1)%k]) for i in range(k)]
         reflex_pairs = get_reflex_edge_pairs(face, pos_init)
         
         for edge_combo in combinations(face_edges, 4):
-            M_eq, b_eq, error, r_init = build_equidistant_for_edges(edge_combo, pos_init, n2i)
+            # NEW: Unpack the center coordinates
+            M_eq, b_eq, error, r_init, center = build_equidistant_for_edges(edge_combo, pos_init, n2i)
             
             if M_eq is None:
                 continue
-            # Identify which reflex pairs this combo contains
+                
             contained_reflex = [rp for rp in reflex_pairs if rp[0] in edge_combo and rp[1] in edge_combo]
             
+            # NEW: Save edges, center, and r_init for the debugger
             candidate = {
                 'error': error,
                 'M_eq': M_eq,
                 'b_eq': b_eq,
-                'reflex_pairs': contained_reflex
+                'reflex_pairs': contained_reflex,
+                'edges': edge_combo,
+                'center': center,
+                'r_ls': r_init
             }
             
             if contained_reflex:
@@ -336,25 +340,20 @@ def solve_absolute_positions(G_in, symmetry='none', N=4):
             else:
                 candidate_constraints_convex.append(candidate)
 
-    # B. Sort groups by error
     candidate_constraints_concave.sort(key=lambda x: x['error'])
     candidate_constraints_convex.sort(key=lambda x: x['error'])
 
-    # C. Greedy Apply with Pair Coverage Deprioritization
     covered_reflex_pairs = set()
+    applied_constraints = [] # NEW: Tracker for the debugger
     
-    # We use a while loop because we will be dynamically moving items to the convex list
     while candidate_constraints_concave and current_rank < target_rank:
         candidate = candidate_constraints_concave.pop(0)
         
-        # Check if ALL reflex pairs in this candidate are already covered
         if all(rp in covered_reflex_pairs for rp in candidate['reflex_pairs']):
             candidate_constraints_convex.append(candidate)
-            # Re-sort convex list to keep it optimal
             candidate_constraints_convex.sort(key=lambda x: x['error'])
             continue
 
-        # Try to apply the constraint
         M_eq, b_eq = candidate['M_eq'], candidate['b_eq']
         rank_increased = False
         for r, val in zip(M_eq, b_eq):
@@ -365,21 +364,25 @@ def solve_absolute_positions(G_in, symmetry='none', N=4):
                 rank_increased = True
         
         if rank_increased:
-            # Mark these reflex pairs as covered
+            applied_constraints.append(candidate) # NEW: Save it
             for rp in candidate['reflex_pairs']:
                 covered_reflex_pairs.add(rp)
 
-    # D. Final Pass: Use remaining Convex candidates to fill any leftover DOFs
     for candidate in candidate_constraints_convex:
         if current_rank >= target_rank: break
         
         M_eq, b_eq = candidate['M_eq'], candidate['b_eq']
+        rank_increased = False
         for r, val in zip(M_eq, b_eq):
             M_test = np.vstack([M, r])
             new_rank = np.linalg.matrix_rank(M_test, tol=1e-7)
             if new_rank > current_rank:
                 M, b, current_rank = M_test, np.append(b, val), new_rank
+                rank_increased = True
                 if current_rank == target_rank: break
+                
+        if rank_increased:
+             applied_constraints.append(candidate) # NEW: Save it
 
     print(f"Final Matrix Rank: {current_rank} / {target_rank}")
     # 4. Pseudoinverse Solve
@@ -391,11 +394,102 @@ def solve_absolute_positions(G_in, symmetry='none', N=4):
         idx = n2i[u]
         pos_solved[u] = (X[2*idx], X[2*idx+1])
         
-    return G, pos_solved, faces
+    return G, pos_init, pos_solved, faces, applied_constraints
 
 # =============================================================================
 # 5. PLOTTING
 # =============================================================================
+import matplotlib.cm as cm
+import matplotlib.patches as patches
+def plot_before_after(G, pos_init, pos_solved, faces, applied_constraints, filename=None):
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
+    
+    # ==========================================
+    # LEFT: BEFORE (pos_init) + Constraints
+    # ==========================================
+    ax1.set_title("Before (pos_init) + Equidistant Candidates", fontsize=14)
+    
+    # Faintly plot all initial edges
+    for u, v in G.edges():
+        ax1.plot([pos_init[u][0], pos_init[v][0]], [pos_init[u][1], pos_init[v][1]], 
+                 'k-', lw=1.5, zorder=2, alpha=0.3)
+                 
+    # Plot initial straight skeletons
+    for face in faces:
+        try:
+            pts = [Point2D(pos_init[n][0], pos_init[n][1]) for n in face]
+            poly = Polygon2D(pts)
+            if poly.area > 0.95: continue 
+            skel_edges = skeleton_as_edge_list(poly)
+            for seg in skel_edges:
+                ax1.plot([seg.p1.x, seg.p2.x], [seg.p1.y, seg.p2.y], 'gray', lw=1, alpha=0.5, zorder=1)
+        except Exception:
+            pass
+
+    # Highlight applied constraints (Edges + Center + Incircle)
+    # Using tab20 to get distinct colors for up to 20 constraints
+    colors = cm.get_cmap('tab20', len(applied_constraints))
+    epsilon = -0.005 # Small shift to move constraint lines inward for better visibility
+    for idx, candidate in enumerate(applied_constraints):
+        color = colors(idx)
+        
+        # 1. Highlight the 4 edges
+        for u, v in candidate['edges']:
+            # Calculate inward normal for this specific edge in this face
+            dx, dy = pos_init[v][0] - pos_init[u][0], pos_init[v][1] - pos_init[u][1]
+            L = math.hypot(dx, dy)
+            nx, ny = -dy/L, dx/L  # Inward normal
+            
+            # Shift the start and end points slightly into the polygon
+            u_shifted = (pos_init[u][0] + nx * epsilon, pos_init[u][1] + ny * epsilon)
+            v_shifted = (pos_init[v][0] + nx * epsilon, pos_init[v][1] + ny * epsilon)
+            
+            ax1.plot([u_shifted[0], v_shifted[0]], [u_shifted[1], v_shifted[1]], 
+                     color=color, lw=3.0, zorder=4, solid_capstyle='round')
+                     
+        # 2. Plot the Least-Squares Center
+        Px, Py = candidate['center']
+        ax1.plot(Px, Py, marker='X', color=color, markersize=8, zorder=5)
+        
+        # 3. Plot the Least-Squares Circle
+        # Radius is absolute because r_ls is signed negative for interior
+        r_ls = candidate['r_ls']
+        circle = patches.Circle((Px, Py), abs(r_ls), color=color, fill=False, linestyle='--', lw=1.5, zorder=5)
+        ax1.add_patch(circle)
+
+    ax1.set_aspect('equal')
+    ax1.axis('off')
+
+    # ==========================================
+    # RIGHT: AFTER (pos_solved)
+    # ==========================================
+    ax2.set_title("After (pos_solved)", fontsize=14)
+    
+    for u, v in G.edges():
+        ax2.plot([pos_solved[u][0], pos_solved[v][0]], [pos_solved[u][1], pos_solved[v][1]], 
+                 'k-', lw=2, zorder=2, alpha=0.7)
+        
+    for u in G.nodes():
+        ax2.plot(pos_solved[u][0], pos_solved[u][1], 'ko', markersize=4, zorder=3)
+
+    for face in faces:
+        try:
+            pts = [Point2D(pos_solved[n][0], pos_solved[n][1]) for n in face]
+            poly = Polygon2D(pts)
+            if poly.area > 0.95: continue 
+            skel_edges = skeleton_as_edge_list(poly)
+            for seg in skel_edges:
+                ax2.plot([seg.p1.x, seg.p2.x], [seg.p1.y, seg.p2.y], 'r-', lw=1.5, alpha=0.8, zorder=1)
+        except Exception:
+            pass
+            
+    ax2.set_aspect('equal')
+    ax2.axis('off')
+
+    plt.tight_layout()
+    if filename:
+        plt.savefig(filename, dpi=200)
+    plt.show()
 
 def plot_with_skeletons(G, pos, faces):
     fig, ax = plt.subplots(figsize=(8,8))
@@ -498,21 +592,30 @@ def plot_multiple(results, filename="renders/solved_batch.png"):
 # EXECUTION
 # =============================================================================
 if __name__ == "__main__":
- 
+    # Test on a single topology to debug
+    for i in random.sample(range(1,9000), 10):
+        G_raw = extract_topology(i, db_name="topologies_4_none.db", N=4)
+
+        G_solved, pos_init, pos_solved, faces, applied_constraints = solve_absolute_positions(G_raw, symmetry='none', N=4)
+
+        print(f"Applied {len(applied_constraints)} equidistant constraint blocks.")
+
+        # Draw the debugger plot
+        plot_before_after(G_solved, pos_init, pos_solved, faces, applied_constraints, filename="renders/debug_before_after.png")
 
     # G_raw = extract_topology(3000, db_name = "topologies_4_none.db")
     # G_solved, pos_solved, faces = solve_absolute_positions(G_raw, symmetry='none', N=4)
     # plot_with_skeletons(G_solved, pos_solved, faces)
    
-    solved_results = []
-    # Assuming you've extracted a list of raw graphs from the DB
-    for G_raw in [extract_topology(i, db_name="topologies_4_diag.db") for i in random.sample(range(1,9000), 36)]: 
-        try:
-            # Solve using your refined displacement logic
-            G_solved, pos_solved, faces = solve_absolute_positions(G_raw, symmetry='none', N=4)
-            solved_results.append((G_solved, pos_solved, faces))
-        except Exception as e:
-            print(f"Failed to solve one topology: {e}")
+    # solved_results = []
+    # # Assuming you've extracted a list of raw graphs from the DB
+    # for G_raw in [extract_topology(i, db_name="topologies_4_diag.db") for i in random.sample(range(1,9000), 36)]: 
+    #     try:
+    #         # Solve using your refined displacement logic
+    #         G_solved, pos_solved, faces = solve_absolute_positions(G_raw, symmetry='none', N=4)
+    #         solved_results.append((G_solved, pos_solved, faces))
+    #     except Exception as e:
+    #         print(f"Failed to solve one topology: {e}")
 
-    # Render the 4x4 grid
-    plot_multiple(solved_results, filename="renders/n4_diag_greedy_results.png")
+    # # Render the 4x4 grid
+    # plot_multiple(solved_results, filename="renders/n4_diag_greedy_results.png")
