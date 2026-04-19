@@ -22,7 +22,6 @@ from scipy.linalg import null_space
 import random
 from itertools import combinations
 
-# Pip install this!
 from py_straight_skeleton import compute_skeleton
 
 # =============================================================================

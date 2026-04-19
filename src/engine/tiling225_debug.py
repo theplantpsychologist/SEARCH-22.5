@@ -17,9 +17,6 @@ Finally, solve the system by taking the pseudoinverse of the constraint matrix a
 
 """
 
-
-from database.tilings.build_topologies import extract_topology
-
 import numpy as np
 import networkx as nx
 import matplotlib.pyplot as plt
@@ -32,6 +29,9 @@ from ladybug_geometry.geometry2d.pointvector import Point2D
 from ladybug_geometry.geometry2d.polygon import Polygon2D
 from ladybug_geometry_polyskel.polyskel import skeleton_as_edge_list
 
+from src.engine.math225_core import Vertex4D, Fraction, AplusBsqrt2, X, Z
+from src.engine.cp225 import Cp225
+from database.tilings.build_topologies import extract_topology
 # =============================================================================
 # 1. GRAPH CLEANUP & METADATA
 # =============================================================================
