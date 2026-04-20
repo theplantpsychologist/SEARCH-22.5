@@ -9,13 +9,14 @@ Output Cp225 object.
 
 from database.tilings.build_topologies import extract_topology
 from src.engine.math225_core import Vertex4D, Fraction
-from src.engine.cp225 import Cp225
+from src.engine.cp225 import Cp225, intersection
 from py_straight_skeleton import compute_skeleton
 
 import numpy as np
 import networkx as nx
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
+import sympy as sp
 import math
 import random
 from scipy.linalg import null_space
@@ -174,32 +175,79 @@ ANGLE_TO_4D = {
     12: [0, 0, -1, 0],
     14: [0, 0, 0, -1]
 }
-def build_quadruplet_constraint_4d(edges, pos,n2i):
+
+def scale_sqrt2(vec):
     """
-    Constrain 4 edges to have an equidistant incircle center. Returns constraint in sparse form (list of dicts)
-    input edges is a tuple of dicts where each dict contains a bunch of precomputed info about each edge
+    Scale a 4d vector by sqrt 2 by swapping x for y-w, y for x + z, etc
     """
-    A = []
+    x, y, z, w = vec
+    return [y - w, x + z, w + y, z - x]
+
+def build_quadruplet_constraint_4d(edges, n2i):
+    """
+    Constrain 4 edges to have an equidistant incircle center. 
+    Returns constraint in sparse form (list of dicts).
+    """
+    A_combined = []
+    
+    # First half of rows rows: Rational equations
     for edge in edges:
         normal = ANGLE_TO_4D[edge["angle"]]
-        A.append(normal + [-1])
-    A = np.array(A)
-    W = null_space(A.T)
-    n = len(n2i)
+        A_combined.append(normal + [-1, 0])
+        
+    # Second half of rows: Irrational equations
+    for edge in edges:
+        normal = ANGLE_TO_4D[edge["angle"]]
+        scaled_normal = scale_sqrt2(normal)
+        A_combined.append(scaled_normal + [0, -1])
+        
+    # 1. Use SymPy for Exact Rational Null Space
+    M_sympy = sp.Matrix(A_combined).T
+    null_basis = M_sympy.nullspace()
+    
     M_rows = []
-    for col in range(W.shape[1]):
-        w = W[:, col]
-        #un-normalize so w is integer
-        w = w / min(abs(w[w.nonzero()]))
-        w = w.astype(int)
-        constraint = {} #a sparse row in the constraint matrix. Should have one nonzero (+-1) element per edge
+    for sp_vec in null_basis:
+        # 2. Extract the exact rational fractions
+        w_frac = [val for val in sp_vec]
+        
+        # 3. Find the Least Common Multiple (LCM) of all denominators
+        lcm = 1
+        for val in w_frac:
+            if val.q != 1: # .q is the denominator in SymPy rationals
+                lcm = abs(lcm * val.q) // math.gcd(lcm, val.q)
+                
+        # 4. Scale the vector up to pure integers
+        w_int = [int(val.p * lcm / val.q) for val in w_frac] # .p is numerator
+        
+        # 5. Divide out the Greatest Common Divisor (GCD) to keep numbers small
+        g = 0
+        for val in w_int:
+            g = math.gcd(g, abs(val))
+        if g > 0:
+            w_int = [val // g for val in w_int]
+        
+        # 6. Map back to the sparse constraint dictionary
+        constraint = {}
         for local_idx, edge in enumerate(edges):
             u = edge["u"]
-            idx = 4*n2i[u]
-            constraint[idx], constraint[idx+1], constraint[idx+2], constraint[idx+3] = w[local_idx]*np.array(ANGLE_TO_4D[edge["angle"]])
-        M_rows.append(constraint)
+            idx = 4 * n2i[u]
+            
+            w_rat = w_int[local_idx]
+            w_irr = w_int[local_idx + 4]
+            
+            normal = np.array(ANGLE_TO_4D[edge["angle"]])
+            scaled = np.array(scale_sqrt2(ANGLE_TO_4D[edge["angle"]]))
+            
+            coeffs = w_rat * normal + w_irr * scaled
+            
+            for c in range(4):
+                if coeffs[c] != 0:
+                    constraint[idx + c] = constraint.get(idx + c, 0) + coeffs[c]
+                    
+        if constraint:
+            M_rows.append(constraint)
+            
     return M_rows, [0] * len(M_rows)
-
 # =============================================================================
 # 3. STRAIGHT-SKELETON BASED CONSTRAINT SELECTION AND GENERATORS
 # =============================================================================
@@ -218,6 +266,67 @@ def get_edge_data(face, pos):
         angle = get_angle(nx, ny)
         edge_data.append({'e': (u, v), 'u': u, 'v': v, 'n': (nx, ny), 'eta': eta, 'pu': p_u, 'pv': p_v, 'angle': angle})
     return edge_data
+
+def compute_interior_skeleton_vertices(face, pos, edge_data):
+    """Uses py_straight_skeleton to find valid interior vertices and map them to generating edges."""
+    skel_vertices = {}
+    exterior = [[float(pos[n][0]), float(pos[n][1])] for n in face]
+    
+    area = sum(exterior[i][0] * exterior[(i+1)%len(exterior)][1] - exterior[(i+1)%len(exterior)][0] * exterior[i][1] for i in range(len(exterior)))
+        
+    if abs(area) / 2.0 > 0.95: 
+        return {}
+        
+    if area < 0:
+        exterior.reverse() 
+        
+    try:
+        skeleton = compute_skeleton(exterior=exterior, holes=[])
+    except Exception:
+        return {}
+
+    internal_positions = []
+    for skv1, skv2 in skeleton.arc_iterator():
+        for skv in (skv1, skv2):
+            try:
+                Px, Py = float(skv.position.x), float(skv.position.y)
+            except AttributeError:
+                Px, Py = float(skv.position[0]), float(skv.position[1])
+                
+            is_internal = True
+            for ex, ey in exterior:
+                if math.isclose(Px, ex, abs_tol=1e-5) and math.isclose(Py, ey, abs_tol=1e-5):
+                    is_internal = False
+                    break
+            if is_internal:
+                internal_positions.append((Px, Py))
+                
+    unique_positions = []
+    for px, py in internal_positions:
+        if not any(math.isclose(px, ux, abs_tol=1e-5) and math.isclose(py, uy, abs_tol=1e-5) for ux, uy in unique_positions):
+            unique_positions.append((px, py))
+            
+    for Px, Py in unique_positions:
+        gen_edges = set()
+        for e1, e2, e3 in combinations(edge_data, 3):
+            A_sys = np.array([
+                [e1['n'][0], e1['n'][1], -1],
+                [e2['n'][0], e2['n'][1], -1],
+                [e3['n'][0], e3['n'][1], -1]
+            ])
+            b_sys = np.array([e1['eta'], e2['eta'], e3['eta']])
+            try:
+                P_triplet = np.linalg.solve(A_sys, b_sys)
+                if math.isclose(Px, P_triplet[0], abs_tol=1e-4) and math.isclose(Py, P_triplet[1], abs_tol=1e-4):
+                    gen_edges.update([e1['e'], e2['e'], e3['e']])
+            except np.linalg.LinAlgError:
+                pass
+                
+        if len(gen_edges) >= 3:
+            key = (round(Px, 5), round(Py, 5))
+            skel_vertices[key] = {'edges': gen_edges, 'P': (Px, Py)}
+            
+    return skel_vertices
 
 def get_py_skeleton_lines(face, pos):
     if len(face) < 3: return []
@@ -245,36 +354,30 @@ def harvest_candidates(faces, face_indices, pos_init):
         perimeter = sum(math.hypot(ed['pv'][0]-ed['pu'][0], ed['pv'][1]-ed['pu'][1]) for ed in edge_data)
         if perimeter < 1e-7: perimeter = 1e-7 
         
-        # Fast algebraic harvest mimicking Straight Skeleton Topology
-        skel_vertices = {}
-        for e1, e2, e3 in combinations(edge_data, 3):
-            A_sys = np.array([[e1['n'][0], e1['n'][1], -1], [e2['n'][0], e2['n'][1], -1], [e3['n'][0], e3['n'][1], -1]])
-            b_sys = np.array([e1['eta'], e2['eta'], e3['eta']])
-            try: P_triplet = np.linalg.solve(A_sys, b_sys)
-            except np.linalg.LinAlgError: continue
-            Px, Py = P_triplet[0], P_triplet[1]
-            # Simple check, rely on topological veto downstream
-            key = (round(Px, 4), round(Py, 4))
-            if key not in skel_vertices: skel_vertices[key] = {'edges': set(), 'P': (Px, Py)}
-            skel_vertices[key]['edges'].update([e1['e'], e2['e'], e3['e']])
-            
-        # Match back to edge dicts
+        # Use py_straight_skeleton to get topologically valid internal vertices
+        skel_vertices = compute_interior_skeleton_vertices(face, pos_init, edge_data)
+        
+        # Match back to edge dicts required by the 4D constraint builder
         edge_lookup = {ed['e']: ed for ed in edge_data}
         deg3_verts = []
+        
         for key, vdata in skel_vertices.items():
             edges_list = [edge_lookup[e] for e in vdata['edges']]
             if len(edges_list) >= 4:
                 for combo in combinations(edges_list, 4):
                     candidates.append({'face_idx': face_idx, 'edges': combo, 'norm_dist': 0.0, 'skel_edge': (vdata['P'], vdata['P']), 'P': vdata['P']})
             elif len(edges_list) == 3:
-                deg3_verts.append(vdata)
+                deg3_verts.append({'P': vdata['P'], 'edges': vdata['edges'], 'full_edges': edges_list})
                 
+        # Find adjacent degree 3 vertices that share exactly 2 generating edges (a skeleton edge)
         for i in range(len(deg3_verts)):
             for j in range(i+1, len(deg3_verts)):
                 v1, v2 = deg3_verts[i], deg3_verts[j]
-                shared = [e for e in v1['edges'] if e in v2['edges']]
+                shared = v1['edges'].intersection(v2['edges'])
                 if len(shared) == 2: 
-                    union_edges = [edge_lookup[e] for e in list(set(v1['edges']).union(set(v2['edges'])))]
+                    # Union of full edges to pass downstream
+                    union_dict = {e['e']: e for e in v1['full_edges'] + v2['full_edges']}
+                    union_edges = list(union_dict.values())
                     if len(union_edges) == 4:
                         phys_dist = math.hypot(v1['P'][0]-v2['P'][0], v1['P'][1]-v2['P'][1])
                         P_mid = ((v1['P'][0]+v2['P'][0])/2, (v1['P'][1]+v2['P'][1])/2)
@@ -287,8 +390,6 @@ def is_valid_diag_cand(edges_info, pos_init):
         if pos_init[u][1] < pos_init[u][0] - 1e-5 or pos_init[v][1] < pos_init[v][0] - 1e-5:
             return True
     return False
-
-
 # =============================================================================
 # 4. EXACT SOLVER PIPELINE
 # =============================================================================
@@ -339,7 +440,7 @@ def solve_absolute_positions(G_in, symmetry='none', N=4):
     n = len(nodes)
     
     # Track 4D variables
-    num_vars = 4 * n
+    num_vars = 4 * n # target rank
     X_init_list = []
     for u in nodes:
         X_init_list.extend([pos_init[u][0], 0, pos_init[u][1], 0])
@@ -356,11 +457,14 @@ def solve_absolute_positions(G_in, symmetry='none', N=4):
     M_dense = build_dense(M_list, num_vars)
     current_rank = np.linalg.matrix_rank(M_dense, tol=1e-7)
     
+    # =========== Straight skeleton quadruplet selection ==========
+
     # 2. Gather and sort candidates
     poly_idx = [i for i, f in enumerate(faces) if len(f) > 4]
     all_candidates = harvest_candidates(faces, poly_idx, pos_init)
     if symmetry == 'diag': 
         all_candidates = [c for c in all_candidates if is_valid_diag_cand(c['edges'], pos_init)]
+    print(f"Harvested {len(all_candidates)} skeleton-based candidates from {len(poly_idx)} faces.")
         
     m_counts = {i: 0 for i in range(len(faces))}
     applied = []
@@ -374,8 +478,9 @@ def solve_absolute_positions(G_in, symmetry='none', N=4):
         ))
         
         cand = all_candidates.pop(0)
-        M_eq, b_eq = build_quadruplet_constraint_4d(cand['edges'], pos_init, n2i)
+        M_eq, b_eq = build_quadruplet_constraint_4d(cand['edges'], n2i)
         if not M_eq: 
+            print(f"Candidate skipped due to empty constraint.")
             continue
             
         cand['M_eq'] = M_eq
@@ -388,7 +493,7 @@ def solve_absolute_positions(G_in, symmetry='none', N=4):
         M_test_dense = build_dense(M_test, num_vars)
         new_rank = np.linalg.matrix_rank(M_test_dense, tol=1e-7)
         
-        if new_rank > current_rank:
+        if new_rank >= current_rank:
             # Check for overconstrained (inconsistent system)
             aug_matrix = np.column_stack([M_test_dense, b_test])
             if np.linalg.matrix_rank(aug_matrix, tol=1e-7) == new_rank:
@@ -398,6 +503,8 @@ def solve_absolute_positions(G_in, symmetry='none', N=4):
                 current_rank = new_rank
                 applied.append(cand)
                 m_counts[cand['face_idx']] += 1
+        else:
+            print(f"Rejected candidate, rank would drop from {current_rank} to {new_rank}")
 
     # 4. Fallback to Quadrilaterals
     if current_rank < num_vars:
@@ -411,7 +518,7 @@ def solve_absolute_positions(G_in, symmetry='none', N=4):
         
         while q_cands and current_rank < num_vars:
             cand = q_cands.pop(0)
-            M_eq, b_eq = build_quadruplet_constraint_4d(cand['edges'], pos_init, n2i)
+            M_eq, b_eq = build_quadruplet_constraint_4d(cand['edges'], n2i)
             if not M_eq: 
                 continue
                 
@@ -434,31 +541,166 @@ def solve_absolute_positions(G_in, symmetry='none', N=4):
 
     print(f"Final Matrix Rank: {current_rank} / {num_vars}")
 
+    def on_edge(u,v):
+        ux,uy = u
+        vx,vy = v
+        return (ux == 0 and vx == 0) or (ux == N and vx == N) or (uy == 0 and vy == 0) or (uy == N and vy == N)
     # 5. Output Parsing
     if current_rank == num_vars:
         print(f"Matrix Full Rank. Solving Exactly.")
         ans = exact_fraction_solve(M_list, b_list, num_vars)
         vertices = [Vertex4D(ans[4*i], ans[4*i+1], ans[4*i+2], ans[4*i+3]) for i in range(n)]
-        cp_edges = [(n2i[u], n2i[v], 'm') for u, v in G.edges()]
+        cp_edges = [(n2i[u], n2i[v], 'b' if (on_edge(u, v)) else 'v') for u, v in G.edges()]
         cp = Cp225(vertices, cp_edges)
         
-        # pos_solved = {}
-        # for i, u in enumerate(nodes):
-        #     x, y, z, w = float(ans[4*i]), float(ans[4*i+1]), float(ans[4*i+2]), float(ans[4*i+3])
-        #     pos_solved[u] = (x + 0.70710678*(y-w), z + 0.70710678*(y+w))
+        pos_solved = {}
+        for i, u in enumerate(nodes):
+            x, y, z, w = float(ans[4*i]), float(ans[4*i+1]), float(ans[4*i+2]), float(ans[4*i+3])
+            pos_solved[u] = (x + 0.70710678*(y-w), z + 0.70710678*(y+w))
+
+        construct_exact_straight_skeleton(cp, pos_solved, faces, n2i)
     else:
         print("Warning: Exhausted all candidates, still rank deficient. Float displacement solve.")
         M_dense = build_dense(M_list, num_vars)
         delta = np.linalg.lstsq(M_dense, np.array(b_list) - M_dense @ np.array(X_init_list), rcond=None)[0]
         ans = np.array(X_init_list) + delta
         cp = None
-        # pos_solved = {}
-        # for i, u in enumerate(nodes):
-        #     x, y, z, w = ans[4*i:4*i+4]
-        #     pos_solved[u] = (x + 0.70710678*(y-w), z + 0.70710678*(y+w))
+        pos_solved = {}
+        for i, u in enumerate(nodes):
+            x, y, z, w = ans[4*i:4*i+4]
+            pos_solved[u] = (x + 0.70710678*(y-w), z + 0.70710678*(y+w))
             
-    return G, pos_init, faces, applied, cp
+    return G, pos_init, faces, applied, cp, pos_solved
+def canonical(p):
+    """Helper to round float coordinates for dictionary hashing."""
+    return (round(p[0], 5), round(p[1], 5))
+def construct_exact_straight_skeleton(cp, pos_solved, faces, n2i):
+    """
+    Computes the exact straight skeleton for each face and adds the 
+    internal vertices and creases directly to the Cp225 object.
+    """
+    for face in faces:
+        exterior = [[float(pos_solved[n][0]), float(pos_solved[n][1])] for n in face]
+        
+        # 1. Skip bounding box and ensure CCW orientation
+        k = len(exterior)
+        area = sum(exterior[i][0] * exterior[(i+1)%k][1] - exterior[(i+1)%k][0] * exterior[i][1] for i in range(k))
+        if abs(area) / 2.0 > 0.95: 
+            continue
+        if area < 0: 
+            exterior.reverse()
+            
+        try:
+            skeleton = compute_skeleton(exterior=exterior, holes=[])
+        except Exception:
+            continue
+            
+        # 2. Build the float topological graph of the skeleton
+        skel_graph = {}
+        for skv1, skv2 in skeleton.arc_iterator():
+            p1 = canonical((float(getattr(skv1.position, 'x', skv1.position[0])), float(getattr(skv1.position, 'y', skv1.position[1]))))
+            p2 = canonical((float(getattr(skv2.position, 'x', skv2.position[0])), float(getattr(skv2.position, 'y', skv2.position[1]))))
+            skel_graph.setdefault(p1, set()).add(p2)
+            skel_graph.setdefault(p2, set()).add(p1)
+            
+        # 3. Map float boundary vertices to their exact Vertex4D counterparts
+        exact_positions = {}
+        node_to_idx = {}
+        
+        for u in face:
+            p_float = pos_solved[u]
+            min_d = float('inf')
+            closest_node = None
+            for node in skel_graph:
+                d = math.hypot(node[0] - p_float[0], node[1] - p_float[1])
+                if d < min_d:
+                    min_d = d
+                    closest_node = node
+                    
+            if min_d < 1e-3 and closest_node is not None:
+                exact_positions[closest_node] = cp.vertices[n2i[u]]
+                node_to_idx[closest_node] = n2i[u]
+                
+        # 4. Iteratively resolve internal nodes from the outside in
+        unresolved = set(skel_graph.keys()) - set(exact_positions.keys())
+        
+        while unresolved:
+            progress = False
+            for node in list(unresolved):
+                # Find all adjacent nodes that already have exact 4D coordinates
+                resolved_nbrs = [nbr for nbr in skel_graph[node] if nbr in exact_positions]
+                
+                # If we have at least 2 known neighbors, we can compute the exact intersection!
+                if len(resolved_nbrs) >= 2:
+                    N_e = None
+                    for i in range(len(resolved_nbrs)):
+                        for j in range(i+1, len(resolved_nbrs)):
+                            A_f = resolved_nbrs[i]
+                            B_f = resolved_nbrs[j]
+                            
+                            # Calculate the float angle and snap to nearest 22.5 deg integer (0-15)
+                            angle_A = int(round(math.atan2(node[1] - A_f[1], node[0] - A_f[0]) / (math.pi/8))) % 16
+                            angle_B = int(round(math.atan2(node[1] - B_f[1], node[0] - B_f[0]) / (math.pi/8))) % 16
+                            
+                            # The intersection function uses % 8 internally, so ray orientation doesn't matter (treats as infinite lines)
+                            N_e = intersection(exact_positions[A_f], exact_positions[B_f], angle_A, angle_B)
+                            if N_e is not None:
+                                break
+                        if N_e is not None:
+                            break
+                            
+                    if N_e is not None:
+                        exact_positions[node] = N_e
+                        
+                        # Add the new exact vertex to the CP
+                        cp.vertices.append(N_e)
+                        node_to_idx[node] = len(cp.vertices) - 1
+                        
+                        unresolved.remove(node)
+                        progress = True
+                        break # Restart the while loop to process the next layer
+                        
+            if not progress:
+                print("Warning: Skeleton topology contains unresolvable internal vertices.")
+                break
+                # Identify reflex boundary nodes for the current face
+        # These are nodes where the interior angle is > 180 degrees
+        reflex_cp_indices = set()
+        k = len(face)
+        for i in range(k):
+            u_id, v_id, w_id = face[i-1], face[i], face[(i+1)%k]
+            p_u, p_v, p_w = pos_solved[u_id], pos_solved[v_id], pos_solved[w_id]
+            
+            # Calculate consecutive edge vectors
+            dx1, dy1 = p_v[0] - p_u[0], p_v[1] - p_u[1]
+            dx2, dy2 = p_w[0] - p_v[0], p_w[1] - p_v[1]
+            
+            # For CCW oriented faces, a right turn (negative cross product) 
+            # indicates a reflex/concave corner
+            if (dx1 * dy2 - dy1 * dx2) > -1e-5:
+                reflex_cp_indices.add(n2i[v_id])
 
+        # 5. Add the exact skeleton creases to the Cp225 object
+        for p1 in skel_graph:
+            for p2 in skel_graph[p1]:
+                if p1 < p2: # Process each undirected edge only once
+                    if p1 in node_to_idx and p2 in node_to_idx:
+                        idx1 = node_to_idx[p1]
+                        idx2 = node_to_idx[p2]
+                        
+                        # Verify we aren't adding an edge that already exists
+                        edge_exists = False
+                        for u, v, _ in cp.edges:
+                            if (u == idx1 and v == idx2) or (u == idx2 and v == idx1):
+                                edge_exists = True
+                                break
+                                
+                        if not edge_exists:
+                            # If one end of the skeleton edge is a concave vertex on the boundary, mark as "v", else "m"
+                            line_type = "v" if ((idx1 in reflex_cp_indices ) or (idx2 in reflex_cp_indices)) else "m"
+                            cp.edges.append((idx1, idx2, line_type))
+                            
+    return cp
 # =============================================================================
 # 5. PLOTTING
 # =============================================================================
@@ -493,12 +735,25 @@ def draw_before_ax(ax, G, pos_init, faces, applied_constraints, title):
     ax.set_aspect('equal')
     ax.axis('off')
 
-def draw_after_ax(ax, G, faces, cp, title):
+plot_colors = {
+    'm': 'red',
+    'v': 'blue',
+    'b': 'black',
+
+    'ridge': 'red', 
+    'axial': 'blue', 
+    'hinge': 'grey'
+}
+def draw_after_ax(ax, G, faces, cp, pos_solved, title):
     ax.set_title(title, fontsize=14)    
     if cp:
         for t, x1, y1, x2, y2 in cp.render():
-            ax.plot([x1, x2], [y1, y2], 'k-', lw=2, zorder=2, alpha=0.7)
-
+            ax.plot([x1, x2], [y1, y2], color = plot_colors[t], lw=2, zorder=2, alpha=0.7)
+    # for u, v in G.edges():
+    #     ax.plot([pos_solved[u][0], pos_solved[v][0]], [pos_solved[u][1], pos_solved[v][1]], 'k-', lw=1.5, zorder=2, alpha=0.3)
+    # for face in faces:
+    #     for p1, p2 in get_py_skeleton_lines(face, pos_solved):
+    #         ax.plot([p1[0], p2[0]], [p1[1], p2[1]], 'red', lw=1.5, alpha=0.5, zorder=1)
     ax.set_aspect('equal')
     ax.axis('off')
 
@@ -511,9 +766,9 @@ def plot_multiple_before_after(results, filename=None):
     axes_flat = axes.flatten() if n_res > 1 else np.array(axes).flatten()
 
     for i in range(n_res):
-        G, pos_init, faces, applied_constraints, cp = results[i]
+        G, pos_init, faces, applied_constraints, cp, pos_solved = results[i]
         draw_before_ax(axes_flat[i * 2], G, pos_init, faces, applied_constraints, f"Graph {i+1}: Before")
-        draw_after_ax(axes_flat[i * 2 + 1], G, faces, cp, f"Graph {i+1}: After")
+        draw_after_ax(axes_flat[i * 2 + 1], G, faces, cp, pos_solved, f"Graph {i+1}: After")
         
     for j in range(n_res * 2, len(axes_flat)): axes_flat[j].axis('off')
     plt.tight_layout()
@@ -525,10 +780,11 @@ def plot_multiple_before_after(results, filename=None):
 # =============================================================================
 if __name__ == "__main__":
     solved_results = []
-    for i in random.sample(range(1, 9000), 5):
+    for i in random.sample(range(1, 9000), 12):
         G_raw = extract_topology(i, db_name="topologies_4_none.db", N=4)
-        G_solved, pos_init, faces, applied, cp = solve_absolute_positions(G_raw, symmetry='none', N=4)
-        print(f"ID {i}: Applied {len(applied)} constraints.")
-        solved_results.append((G_solved, pos_init,faces, applied, cp))
+        G_solved, pos_init, faces, applied, cp, pos_solved = solve_absolute_positions(G_raw, symmetry='none', N=4)
+        print(f"ID {i}: Applied {len(applied)} constraints.\n")
+        solved_results.append((G_solved, pos_init,faces, applied, cp, pos_solved))
+        
             
     plot_multiple_before_after(solved_results, filename="renders/debug_batch_none_exact.png")
