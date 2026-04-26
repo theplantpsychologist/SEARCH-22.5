@@ -283,8 +283,60 @@ def get_edge_data(face, pos):
 #     if len(cleaned) > 1 and math.hypot(cleaned[0][0]-cleaned[-1][0], cleaned[0][1]-cleaned[-1][1]) < 1e-5:
 #         cleaned.pop()
 #     return cleaned
+# def dedupe_exterior(exterior):
+#     """Removes overlapping vertices and antiparallel spikes caused by exact solver merges."""
+#     if not exterior: return []
+    
+#     # Pass 1: Remove exact consecutive duplicates
+#     cleaned = [exterior[0]]
+#     for p in exterior[1:]:
+#         if math.hypot(p[0]-cleaned[-1][0], p[1]-cleaned[-1][1]) > 1e-5:
+#             cleaned.append(p)
+#     if len(cleaned) > 1 and math.hypot(cleaned[0][0]-cleaned[-1][0], cleaned[0][1]-cleaned[-1][1]) < 1e-5:
+#         cleaned.pop()
+        
+#     # Pass 2: Remove antiparallel spikes (where the polygon folds completely flat)
+#     while len(cleaned) >= 3:
+#         spike_found = False
+#         for i in range(len(cleaned)):
+#             prev = cleaned[i-1]
+#             curr = cleaned[i]
+#             nxt = cleaned[(i+1)%len(cleaned)]
+            
+#             dx1, dy1 = curr[0] - prev[0], curr[1] - prev[1]
+#             dx2, dy2 = nxt[0] - curr[0], nxt[1] - curr[1]
+            
+#             L1, L2 = math.hypot(dx1, dy1), math.hypot(dx2, dy2)
+#             if L1 > 1e-5 and L2 > 1e-5:
+#                 # If dot product is approx -1, the vectors point in exact opposite directions
+#                 dot = (dx1*dx2 + dy1*dy2) / (L1*L2)
+#                 if dot < -0.999: 
+#                     cleaned.pop(i) # Remove the spike vertex
+#                     spike_found = True
+#                     break
+#         if not spike_found:
+#             break
+            
+#     return cleaned
+
+# def compute_skeleton_wrapper(exterior, holes = []):
+#     k = len(exterior)
+#     area = sum(exterior[i][0] * exterior[(i+1)%k][1] - exterior[(i+1)%k][0] * exterior[i][1] for i in range(k))
+#     if abs(area) / 2.0 > 0.95: 
+#         return None
+#     if area < 0: 
+#         exterior.reverse()
+#     exterior = dedupe_exterior(exterior)
+#     if len(exterior) < 3: return {}
+#     clean_area = sum(exterior[i][0] * exterior[(i+1)%len(exterior)][1] - exterior[(i+1)%len(exterior)][0] * exterior[i][1] for i in range(len(exterior)))
+#     if abs(clean_area) < 1e-5: return {}
+#     try:
+#         return compute_skeleton(exterior=exterior, holes=[])
+#     except Exception as e:
+#         print(f"Error computing skeleton: {e}")
+#         return None
 def dedupe_exterior(exterior):
-    """Removes overlapping vertices and antiparallel spikes caused by exact solver merges."""
+    """Removes overlapping vertices, antiparallel spikes, and collinear flat vertices."""
     if not exterior: return []
     
     # Pass 1: Remove exact consecutive duplicates
@@ -295,7 +347,7 @@ def dedupe_exterior(exterior):
     if len(cleaned) > 1 and math.hypot(cleaned[0][0]-cleaned[-1][0], cleaned[0][1]-cleaned[-1][1]) < 1e-5:
         cleaned.pop()
         
-    # Pass 2: Remove antiparallel spikes (where the polygon folds completely flat)
+    # Pass 2: Remove all parallel anomalies (spikes AND collinear edges)
     while len(cleaned) >= 3:
         spike_found = False
         for i in range(len(cleaned)):
@@ -308,16 +360,52 @@ def dedupe_exterior(exterior):
             
             L1, L2 = math.hypot(dx1, dy1), math.hypot(dx2, dy2)
             if L1 > 1e-5 and L2 > 1e-5:
-                # If dot product is approx -1, the vectors point in exact opposite directions
-                dot = (dx1*dx2 + dy1*dy2) / (L1*L2)
-                if dot < -0.999: 
-                    cleaned.pop(i) # Remove the spike vertex
+                # If cross product is approx 0, the segments are parallel
+                cross = (dx1*dy2 - dy1*dx2) / (L1*L2)
+                if abs(cross) < 1e-5: 
+                    cleaned.pop(i) # Safely bypass the redundant middle vertex
                     spike_found = True
                     break
         if not spike_found:
             break
             
     return cleaned
+def compute_skeleton_wrapper(exterior, holes=[]):
+    # =========================================================================
+    # 1. AGGRESSIVE QUANTIZATION
+    # Snap to 5 decimal places to force float-noise degeneracies into exact collisions.
+    # =========================================================================
+    quant_exterior = [(round(p[0], 3), round(p[1], 3)) for p in exterior]
+    
+    k = len(quant_exterior)
+    area = sum(quant_exterior[i][0] * quant_exterior[(i+1)%k][1] - quant_exterior[(i+1)%k][0] * quant_exterior[i][1] for i in range(k))
+    
+    if abs(area) / 2.0 > 0.95: 
+        return None
+    if area < 0: 
+        quant_exterior.reverse()
+        
+    # =========================================================================
+    # 2. DEDUPLICATE QUANTIZED GEOMETRY
+    # The dedupe function will now perfectly catch the snapped zero-length edges 
+    # and 180-degree flats.
+    # =========================================================================
+    cleaned = dedupe_exterior(quant_exterior)
+    
+    if len(cleaned) < 3: return None
+    
+    clean_area = sum(cleaned[i][0] * cleaned[(i+1)%len(cleaned)][1] - cleaned[(i+1)%len(cleaned)][0] * cleaned[i][1] for i in range(len(cleaned)))
+    if abs(clean_area) < 1e-5: return None
+    
+    # =========================================================================
+    # 3. CGAL SWEEP
+    # =========================================================================
+    try:
+        return compute_skeleton(exterior=cleaned, holes=[])
+    except Exception as e:
+        # If it still crashes here, the geometry has folded into an unresolvable bowtie.
+        print(f"Skeleton failed after quantization: {e}")
+        return None
 def is_boundary_edge(ed, N):
     """Returns True if the edge lies entirely on the N x N bounding box."""
     x1, y1 = ed['pu']
@@ -853,23 +941,6 @@ def canonical(p):
     """Helper to round float coordinates for dictionary hashing."""
     return (round(p[0], 5), round(p[1], 5))
 
-def compute_skeleton_wrapper(exterior, holes = []):
-    k = len(exterior)
-    area = sum(exterior[i][0] * exterior[(i+1)%k][1] - exterior[(i+1)%k][0] * exterior[i][1] for i in range(k))
-    if abs(area) / 2.0 > 0.95: 
-        return None
-    if area < 0: 
-        exterior.reverse()
-    exterior = dedupe_exterior(exterior)
-    if len(exterior) < 3: return {}
-    clean_area = sum(exterior[i][0] * exterior[(i+1)%len(exterior)][1] - exterior[(i+1)%len(exterior)][0] * exterior[i][1] for i in range(len(exterior)))
-    if abs(clean_area) < 1e-5: return {}
-    try:
-        return compute_skeleton(exterior=exterior, holes=[])
-    except Exception as e:
-        print(f"Error computing skeleton: {e}")
-        return None
-    
 def construct_exact_straight_skeleton(cp, pos_solved, faces, n2i):
     """
     Computes the exact straight skeleton for each face and adds the 
@@ -1070,9 +1141,9 @@ if __name__ == "__main__":
     profiler.enable()
 
     solved_results = []
-    for i in random.sample(range(1, 9000), 8):
-        G_raw = extract_topology(i, db_name="topologies_4_none.db", N=4)
-        G_solved, pos_init, faces, applied, cp, pos_solved = solve_absolute_positions(G_raw, symmetry='none', N=4)
+    for i in random.sample(range(1, 90000), 30):
+        G_raw = extract_topology(i, db_name="topologies_4_diag.db", N=4)
+        G_solved, pos_init, faces, applied, cp, pos_solved = solve_absolute_positions(G_raw, symmetry='diag', N=4)
         print(f"ID {i}: Applied {len(applied)} constraints.\n")
         solved_results.append((G_solved, pos_init,faces, applied, cp, pos_solved))
         
@@ -1081,4 +1152,4 @@ if __name__ == "__main__":
     stats.sort_stats("cumulative")  # Sort by cumulative time
     stats.print_stats(10)  # Print the top  functions
 
-    plot_multiple_before_after(solved_results, filename="renders/debug_batch_none_exact.png")
+    plot_multiple_before_after(solved_results, filename="renders/debug_batch_diag_exact.png")
