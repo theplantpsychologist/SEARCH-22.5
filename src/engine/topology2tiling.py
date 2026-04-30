@@ -13,6 +13,7 @@ import networkx as nx
 import math
 import pulp
 from itertools import combinations
+import sympy as sp
 
 # =============================================================================
 # CONFIGURATION & TUNING (Easily Accessible)
@@ -162,7 +163,6 @@ def build_boundary_constraints_4d(n2i, N):
     return M, b
 
 def build_quadruplet_constraint_4d(edges, n2i):
-    import sympy as sp
     A_combined = []
     for edge in edges: A_combined.append(ANGLE_TO_4D[edge["angle"]] + [-1, 0])
     for edge in edges: A_combined.append(scale_sqrt2(ANGLE_TO_4D[edge["angle"]]) + [0, -1])
@@ -225,16 +225,18 @@ def is_boundary_edge(ed, N):
            (math.isclose(x1, N, abs_tol=1e-5) and math.isclose(x2, N, abs_tol=1e-5)) or \
            (math.isclose(y1, 0, abs_tol=1e-5) and math.isclose(y2, 0, abs_tol=1e-5)) or \
            (math.isclose(y1, N, abs_tol=1e-5) and math.isclose(y2, N, abs_tol=1e-5))
-
-def harvest_candidates(faces, pos_init, symmetry, N=4):
+def harvest_candidates(faces, pos_init, symmetry, N=4, exhaustive = False):
     candidates = []
     for face_idx, face in enumerate(faces):
         k = len(face)
-        if k < 4: continue
 
-        area = sum(pos_init[face[i]][0] * pos_init[face[(i+1)%k]][1] - pos_init[face[(i+1)%k]][0] * pos_init[face[i]][1] for i in range(k))
+        # skip triangles
+        if k < 4: continue
+        # To reject the outer square as a face
+        area = sum(pos_init[face[m]][0] * pos_init[face[(m+1)%k]][1] - pos_init[face[(m+1)%k]][0] * pos_init[face[m]][1] for m in range(k))
         if area > -1e-5: continue
         
+        # reject symmetric redundancy
         if symmetry == 'diag' and not any(pos_init[v][1] < pos_init[v][0] - 1e-5 for v in face): continue
         elif symmetry == 'book' and not any(pos_init[v][0] > N/2 + 1e-5 for v in face): continue
                 
@@ -242,58 +244,50 @@ def harvest_candidates(faces, pos_init, symmetry, N=4):
         quad_indices = set()
         reflex_pairs = set()
         
+        # Identify reflex pairs (needed for tagging regardless of harvest level)
         for i in range(k):
-            quad_indices.add(tuple(sorted([i, (i+1)%k, (i+2)%k, (i+3)%k])))
-            if k >= 5:
-                quad_indices.add(tuple(sorted([i, (i+1)%k, (i+2)%k, (i+4)%k])))
-                quad_indices.add(tuple(sorted([i, (i+1)%k, (i+3)%k, (i+4)%k])))
-                quad_indices.add(tuple(sorted([i, (i+2)%k, (i+3)%k, (i+4)%k])))
-                
             u_id, v_id, w_id = face[i-1], face[i], face[(i+1)%k]
             dx1, dy1 = pos_init[v_id][0] - pos_init[u_id][0], pos_init[v_id][1] - pos_init[u_id][1]
             dx2, dy2 = pos_init[w_id][0] - pos_init[v_id][0], pos_init[w_id][1] - pos_init[v_id][1]
             if (dx1 * dy2 - dy1 * dx2) > -1e-5: 
                 reflex_pairs.add(tuple(sorted([(i-1)%k, i])))
-                
-        for r_pair in reflex_pairs:
-            idx1, idx2 = r_pair
-            n1, n2 = edge_data[idx1]['n'], edge_data[idx2]['n']
-            Dx, Dy = -n1[0] - n2[0], -n1[1] - n2[1]
-            mag = math.hypot(Dx, Dy)
-            if mag < 1e-5: continue
-            Dx, Dy = Dx/mag, Dy/mag
-            p_v = pos_init[face[max(idx1, idx2)]] if abs(idx1 - idx2) == 1 else pos_init[face[0]] 
-            
-            min_t, hit_j = float('inf'), -1
-            for j in range(k):
-                if j == idx1 or j == idx2: continue 
-                t = ray_segment_intersect(p_v, (Dx, Dy), edge_data[j]['pu'], edge_data[j]['pv'])
-                if t is not None and t < min_t: min_t, hit_j = t, j
-            if hit_j != -1:
-                quad_indices.add(tuple(sorted([idx1, idx2, (hit_j-1)%k, hit_j])))
-                quad_indices.add(tuple(sorted([idx1, idx2, hit_j, (hit_j+1)%k])))
+
+        if exhaustive:
+            for combo in combinations(range(k), 4):
+                quad_indices.add(tuple(sorted(combo)))
+        else:
+            # LEVEL 0: Contiguous Heuristics & Reflexive raycasts
+            for i in range(k):
+                quad_indices.add(tuple(sorted([i, (i+1)%k, (i+2)%k, (i+3)%k])))
+                if k >= 5:
+                    quad_indices.add(tuple(sorted([i, (i+1)%k, (i+2)%k, (i+4)%k])))
+                    quad_indices.add(tuple(sorted([i, (i+1)%k, (i+3)%k, (i+4)%k])))
+                    quad_indices.add(tuple(sorted([i, (i+2)%k, (i+3)%k, (i+4)%k])))
                     
+            for r_pair in reflex_pairs:
+                idx1, idx2 = r_pair
+                n1, n2 = edge_data[idx1]['n'], edge_data[idx2]['n']
+                Dx, Dy = -n1[0] - n2[0], -n1[1] - n2[1]
+                mag = math.hypot(Dx, Dy)
+                if mag < 1e-5: continue
+                Dx, Dy = Dx/mag, Dy/mag
+                p_v = pos_init[face[max(idx1, idx2)]] if abs(idx1 - idx2) == 1 else pos_init[face[0]] 
+                
+                min_t, hit_j = float('inf'), -1
+                for j in range(k):
+                    if j == idx1 or j == idx2: continue 
+                    t = ray_segment_intersect(p_v, (Dx, Dy), edge_data[j]['pu'], edge_data[j]['pv'])
+                    if t is not None and t < min_t: min_t, hit_j = t, j
+                if hit_j != -1:
+                    quad_indices.add(tuple(sorted([idx1, idx2, (hit_j-1)%k, hit_j])))
+                    quad_indices.add(tuple(sorted([idx1, idx2, hit_j, (hit_j+1)%k])))
         for indices in quad_indices:
             combo = [edge_data[idx] for idx in indices]
-            if all(is_boundary_edge(ed, N) for ed in combo): continue
-            A, eta_init = [], []
-            for ed in combo:
-                A.append([ed['n'][0], ed['n'][1], -1])
-                eta_init.append(ed['eta'])
-                
-            try:
-                xi, _, _, _ = np.linalg.lstsq(np.array(A), np.array(eta_init), rcond=None)
-                Px, Py, r = xi[0], xi[1], xi[2]
-            except np.linalg.LinAlgError:
-                continue
-                
-            if abs(r) > 2*N or not (-N <= Px <= 2*N) or not (-N <= Py <= 2*N): continue
-                
+            
             has_reflex = any(tuple(sorted([indices[a], indices[b]])) in reflex_pairs for a in range(4) for b in range(a+1, 4))
             candidates.append({
                 'face_idx': face_idx, 'edges': combo, 'edge_indices': indices, 
-                'P': (Px, Py), 'has_reflex': has_reflex, 'poly_size': k,
-                'norm_dist': abs(r) # Used for sorting unused candidates in fallback
+                'has_reflex': has_reflex, 'poly_size': k,
             })
     return candidates
 
@@ -317,7 +311,7 @@ def get_safe_invader_edges(quad_indices, reflex_vertices, k):
     return safe_edges
 
 def run_milp_selection(G, pos_init, nodes, faces, all_candidates, symmetry, N):
-    epsilon = EPSILON / N
+    epsilon = EPSILON# / N
     C = C_scale * N
     prob = pulp.LpProblem("Skeleton_Quadruplets", pulp.LpMaximize)
 
@@ -330,6 +324,7 @@ def run_milp_selection(G, pos_init, nodes, faces, all_candidates, symmetry, N):
         P_vars.append((pulp.LpVariable(f"Px_{k}", lowBound=-N, upBound=2*N), pulp.LpVariable(f"Py_{k}", lowBound=-N, upBound=2*N)))
         r_vars.append(pulp.LpVariable(f"r_{k}", lowBound=0, upBound=N))
 
+    # objective: maximize number of quadruplets, with weighted priority
     objective_terms = []
     for k, cand in enumerate(all_candidates):
         base_weight = MILPTuning.CONCAVE_WEIGHT if cand['has_reflex'] else MILPTuning.BASE_WEIGHT
@@ -337,6 +332,7 @@ def run_milp_selection(G, pos_init, nodes, faces, all_candidates, symmetry, N):
         objective_terms.append(final_weight * z_vars[k])
     prob += pulp.lpSum(objective_terms)
 
+    # 45 degree angle constraints, and no-cross/collapse constraints
     for u, v in G.edges():
         dx, dy = pos_init[v][0] - pos_init[u][0], pos_init[v][1] - pos_init[u][1]
         if math.isclose(dy, 0, abs_tol=1e-5): prob += y_vars[u] == y_vars[v]
@@ -347,6 +343,7 @@ def run_milp_selection(G, pos_init, nodes, faces, all_candidates, symmetry, N):
         L = math.hypot(dx, dy)
         prob += (x_vars[v] - x_vars[u])*(dx/L) + (y_vars[v] - y_vars[u])*(dy/L) >= epsilon
 
+    # optional symmetry constraints
     if symmetry != 'none':
         for u in nodes:
             u_sym = (u[1], u[0]) if symmetry == 'diag' else (N - u[0], u[1])
@@ -358,9 +355,11 @@ def run_milp_selection(G, pos_init, nodes, faces, all_candidates, symmetry, N):
                     prob += x_vars[u] == N - x_vars[u_sym]
                     prob += y_vars[u] == y_vars[u_sym]
 
+    # boundary constraints
     if (0,0) in nodes: prob += x_vars[(0,0)] == 0; prob += y_vars[(0,0)] == 0
     if (N,N) in nodes: prob += x_vars[(N,N)] == N; prob += y_vars[(N,N)] == N
 
+    # precalculate concave vertices and convex chains
     face_reflex_verts = {}
     for face_idx, face in enumerate(faces):
         k = len(face)
@@ -371,7 +370,63 @@ def run_milp_selection(G, pos_init, nodes, faces, all_candidates, symmetry, N):
             dx2, dy2 = pos_init[w_id][0] - pos_init[v_id][0], pos_init[w_id][1] - pos_init[v_id][1]
             if (dx1 * dy2 - dy1 * dx2) > -1e-5: reflex_set.add(i)
         face_reflex_verts[face_idx] = reflex_set
+    
+    # no-clip constraints for concave vertices: each concave vertex must be strictly outside at least one of the 3 "safe zones" defined by each non-adjacent edge
+    for face_idx, face in enumerate(faces):
+        k = len(face)
+        if k <= 4: continue # Triangles and quads cannot self-intersect this way
+        # reject outer square
+        area = sum(pos_init[face[m]][0] * pos_init[face[(m+1)%k]][1] - pos_init[face[(m+1)%k]][0] * pos_init[face[m]][1] for m in range(k))
+        is_ccw = (area > 0)
 
+        reflex_indices = face_reflex_verts[face_idx]
+        for i in reflex_indices:
+            v_c = face[i]
+            
+            for j in range(k):
+                # Skip the two edges directly adjacent to the concave vertex
+                if j == i or j == (i - 1) % k:
+                    continue
+                    
+                u = face[j]
+                v = face[(j + 1) % k]
+                
+                # Extract constant unit vectors from the initial geometry
+                dx_init = pos_init[v][0] - pos_init[u][0]
+                dy_init = pos_init[v][1] - pos_init[u][1]
+                L_init = math.hypot(dx_init, dy_init)
+                
+                t_x, t_y = dx_init / L_init, dy_init / L_init
+                # Outward normal for CW-oriented faces
+                n_x, n_y = -t_y, t_x 
+                
+                # Binary indicator variables for the 3 safe zones
+                b1 = pulp.LpVariable(f"safe1_f{face_idx}_vc{v_c}_{u}_{v}", cat=pulp.LpBinary)
+                b2 = pulp.LpVariable(f"safe2_f{face_idx}_vc{v_c}_{u}_{v}", cat=pulp.LpBinary)
+                b3 = pulp.LpVariable(f"safe3_f{face_idx}_vc{v_c}_{u}_{v}", cat=pulp.LpBinary)
+                
+                # At least one safe zone must be active
+                prob += b1 + b2 + b3 >= 1
+                
+                # Zone 1: Strictly behind the edge (outward normal projection <= -epsilon)
+                proj_n = (x_vars[v_c] - x_vars[u])*n_x + (y_vars[v_c] - y_vars[u])*n_y
+                # prob += proj_n <= -epsilon + C * (1 - b1)
+                if is_ccw:
+                    # Inside is LEFT. So v_c must be LEFT (proj_n >= 0)
+                    prob += proj_n >= epsilon - C * (1 - b1)
+                else:
+                    # Inside is RIGHT. So v_c must be RIGHT (proj_n <= 0)
+                    prob += proj_n <= -epsilon + C * (1 - b1)
+                
+                # Zone 2: Strictly to the left of the edge shadow
+                proj_t_left = (x_vars[v_c] - x_vars[u])*t_x + (y_vars[v_c] - y_vars[u])*t_y
+                prob += proj_t_left <= -epsilon + C * (1 - b2)
+                
+                # Zone 3: Strictly to the right of the edge shadow
+                proj_t_right = (x_vars[v_c] - x_vars[v])*t_x + (y_vars[v_c] - y_vars[v])*t_y
+                prob += proj_t_right >= epsilon - C * (1 - b3)
+    
+    # quadruplet toggles
     for k, cand in enumerate(all_candidates):
         z, Px, Py, r = z_vars[k], P_vars[k][0], P_vars[k][1], r_vars[k]
         face_idx, face, poly_size = cand['face_idx'], faces[cand['face_idx']], cand['poly_size']
@@ -394,13 +449,21 @@ def run_milp_selection(G, pos_init, nodes, faces, all_candidates, symmetry, N):
                     expr = -nx*Px - ny*Py + nx*x_vars[u_f] + ny*y_vars[u_f] - r
                     prob += expr >= -C*(1 - z)
 
+    # solve MILP
     prob.solve(pulp.PULP_CBC_CMD(msg=False, timeLimit=60))
+
+    milp_pos = {}
+    if prob.status == pulp.LpStatusOptimal:
+        for u in nodes:
+            milp_pos[u] = (pulp.value(x_vars[u]), pulp.value(y_vars[u]))
+
     active_candidates = []
     if prob.status == pulp.LpStatusOptimal:
         for k, cand in enumerate(all_candidates):
             if pulp.value(z_vars[k]) is not None and pulp.value(z_vars[k]) > 0.5:
                 active_candidates.append(cand)
-    return active_candidates
+    # print(milp_pos)
+    return active_candidates, milp_pos
 
 
 # =============================================================================
@@ -445,15 +508,94 @@ def exact_fraction_solve(M_list, b_list, num_vars):
                 break
     return ans
 
+def is_valid_geometry(ans, nodes, G, pos_init, faces, N, face_reflex_verts):
+    """
+    Takes the Exact Fractional Gauss-Jordan solution and verifies it physically 
+    doesn't violate edge collapse or concave anti-bowtie constraints.
+    """
+    S2 = 0.7071067811865476
+    pos_float = {}
+    
+    for i, u in enumerate(nodes):
+        x = float(ans[4*i].num) / float(ans[4*i].den) if ans[4*i].den != 0 else 0
+        y = float(ans[4*i+1].num) / float(ans[4*i+1].den) if ans[4*i+1].den != 0 else 0
+        z = float(ans[4*i+2].num) / float(ans[4*i+2].den) if ans[4*i+2].den != 0 else 0
+        w = float(ans[4*i+3].num) / float(ans[4*i+3].den) if ans[4*i+3].den != 0 else 0
+        
+        px = x + S2 * (y - w)
+        pz = z + S2 * (y + w)
+        pos_float[u] = (px, pz)
+        
+    # Check 1: Edge integrity (No collapsing or inverting)
+    epsilon = 0.01 
+    for u, v in G.edges():
+        dx_init = pos_init[v][0] - pos_init[u][0]
+        dy_init = pos_init[v][1] - pos_init[u][1]
+        L_init = math.hypot(dx_init, dy_init)
+        
+        ex_u, ex_v = pos_float[u], pos_float[v]
+        dx_ex = ex_v[0] - ex_u[0]
+        dy_ex = ex_v[1] - ex_u[1]
+        
+        dot = dx_ex * (dx_init/L_init) + dy_ex * (dy_init/L_init)
+        if dot < epsilon:
+            return False 
+
+    # Check 2: Global Anti-Bowtie Safe Zones
+    for face_idx, face in enumerate(faces):
+        k = len(face)
+        if k <= 3: continue
+        
+        area = sum(pos_init[face[m]][0] * pos_init[face[(m+1)%k]][1] - pos_init[face[(m+1)%k]][0] * pos_init[face[m]][1] for m in range(k))
+        is_ccw = (area > 0)
+        
+        for i in face_reflex_verts[face_idx]:
+            v_c = face[i]
+            ex_c = pos_float[v_c]
+            
+            for j in range(k):
+                if j == i or j == (i - 1) % k: continue
+                
+                u = face[j]
+                v = face[(j+1)%k]
+                ex_u = pos_float[u]
+                ex_v = pos_float[v]
+                
+                dx_init = pos_init[v][0] - pos_init[u][0]
+                dy_init = pos_init[v][1] - pos_init[u][1]
+                L_init = math.hypot(dx_init, dy_init)
+                if L_init < 1e-5: continue
+                
+                t_x, t_y = dx_init / L_init, dy_init / L_init
+                n_x, n_y = -t_y, t_x 
+                tol = 1e-4
+                
+                proj_n = (ex_c[0] - ex_u[0])*n_x + (ex_c[1] - ex_u[1])*n_y
+                safe1 = (proj_n >= -tol) if is_ccw else (proj_n <= tol)
+                
+                proj_t_left = (ex_c[0] - ex_u[0])*t_x + (ex_c[1] - ex_u[1])*t_y
+                safe2 = (proj_t_left <= tol)
+                
+                proj_t_right = (ex_c[0] - ex_v[0])*t_x + (ex_c[1] - ex_v[1])*t_y
+                safe3 = (proj_t_right >= -tol)
+                
+                if not (safe1 or safe2 or safe3):
+                    return False 
+                    
+    return True
+
 # ==== Main function ====
+# 
+def get_current_rank(M_list, num_vars):
+    """Uses SymPy to ensure absolute exact rank without NumPy float SVD hallucinations."""
+    import sympy as sp
+    mat = sp.zeros(len(M_list), num_vars)
+    for r, row_dict in enumerate(M_list):
+        for c, coef in row_dict.items():
+            mat[r, c] = int(coef)
+    return mat.rank()
+
 def solve_tiling(G_in, symmetry='none', N=4):
-    """
-    Main entry point for pipeline. 
-    1. Extracts topology and candidates.
-    2. Runs MILP.
-    3. Triggers greedy fallback if underconstrained.
-    4. Exact solves and returns the serializable Graph and positions.
-    """
     G, pos_init, nodes, n2i = clean_deg2_vertices(G_in, N)
     n = len(nodes)
     num_vars = 4 * n 
@@ -461,60 +603,89 @@ def solve_tiling(G_in, symmetry='none', N=4):
     M_ang, b_ang = build_angle_constraints_4d(G, pos_init, n2i)
     M_sym, b_sym = build_symmetry_constraints_4d(nodes, n2i, symmetry, N)
     M_bnd, b_bnd = build_boundary_constraints_4d(n2i, N)
-    M_list = M_ang + M_sym + M_bnd
-    b_list = b_ang + b_sym + b_bnd
+    M_base = M_ang + M_sym + M_bnd
+    b_base = b_ang + b_sym + b_bnd
     
     faces = extract_oriented_faces(G, pos_init)
-    all_candidates = harvest_candidates(faces, pos_init, symmetry)
-    applied = run_milp_selection(G, pos_init, nodes, faces, all_candidates, symmetry, N)
     
-    # Assembly
+    # 1. Precompute reflex vertices for verifier
+    face_reflex_verts = {}
+    for face_idx, face in enumerate(faces):
+        k = len(face)
+        reflex_set = set()
+        for i in range(k):
+            u_id, v_id, w_id = face[i-1], face[i], face[(i+1)%k]
+            dx1, dy1 = pos_init[v_id][0] - pos_init[u_id][0], pos_init[v_id][1] - pos_init[u_id][1]
+            dx2, dy2 = pos_init[w_id][0] - pos_init[v_id][0], pos_init[w_id][1] - pos_init[v_id][1]
+            if (dx1 * dy2 - dy1 * dx2) > -1e-5: reflex_set.add(i)
+        face_reflex_verts[face_idx] = reflex_set
+
+    # 2. Exhaustive Harvest (Level 1) & MILP Selection
+    # (Ensure harvest_candidates is set to your exhaustive combinatorics mode)
+    heuristic_candidates = harvest_candidates(faces, pos_init, symmetry, N, exhaustive=False)
+    applied, milp_pos = run_milp_selection(G, pos_init, nodes, faces, heuristic_candidates, symmetry, N)
+    
+    M_list = list(M_base)
+    b_list = list(b_base)
     for cand in applied:
         M_eq, b_eq = build_quadruplet_constraint_4d(cand['edges'], n2i)
         if M_eq: 
             M_list += M_eq
             b_list += b_eq
 
-    M_dense = build_dense(M_list, num_vars)
-    current_rank = np.linalg.matrix_rank(M_dense, tol=1e-7)
+    current_rank = get_current_rank(M_list, num_vars)
+    print(f"MILP Base Assembly Complete. Current rank: {current_rank} / {num_vars}")
 
-    # -------------------------------------------------------------------------
-    # GREEDY FALLBACK: Exhaust unused candidates if MILP underconstrained system
-    # -------------------------------------------------------------------------
-    if current_rank < num_vars:
-        unused = [c for c in all_candidates if c not in applied]
-        unused.sort(key=lambda c: c['norm_dist']) # Prioritize physically tighter incircles
+    # =========================================================================
+    # 3. EXACT CONSTRAINT SCAVENGER (Depth-First Search)
+    # Hunts down the remaining quadruplets that lock sliding rigid-blocks 
+    # without violating physical geometry.
+    # =========================================================================
+    ans_final = None
+
+    if current_rank == num_vars:
+        ans_final = exact_fraction_solve(M_list, b_list, num_vars)
+    else:
+        print("System underconstrained. Launching Exact DFS Scavenger...")
+        exhaustive_candidates = harvest_candidates(faces, pos_init, symmetry, N, exhaustive=True)
+        unused_candidates = [c for c in exhaustive_candidates if c not in applied]
         
-        for cand in unused:
-            M_eq, b_eq = build_quadruplet_constraint_4d(cand['edges'], n2i)
-            if not M_eq: continue
+        def scavenger_dfs(M_curr, b_curr, rank_curr, pool):
+            # Base Case: Full Rank Achieved
+            if rank_curr == num_vars:
+                ans_test = exact_fraction_solve(M_curr, b_curr, num_vars)
+                if None not in ans_test: # Check for contradictory nullspace
+                    # Final physical gauntlet
+                    if is_valid_geometry(ans_test, nodes, G, pos_init, faces, N, face_reflex_verts):
+                        return ans_test
+                return None
             
-            M_test = M_list + M_eq
-            M_test_dense = build_dense(M_test, num_vars)
-            new_rank = np.linalg.matrix_rank(M_test_dense, tol=1e-7)
+            # Recursive Step: Try adding independent constraints
+            for i, cand in enumerate(pool):
+                M_eq, b_eq = build_quadruplet_constraint_4d(cand['edges'], n2i)
+                if not M_eq: continue
+                
+                M_next = M_curr + M_eq
+                rank_next = get_current_rank(M_next, num_vars)
+                
+                # Only branch if it actively locks a sliding degree of freedom
+                if rank_next > rank_curr:
+                    res = scavenger_dfs(M_next, b_curr + b_eq, rank_next, pool[i+1:])
+                    if res is not None:
+                        return res
+            return None
             
-            if new_rank > current_rank:
-                M_list = M_test
-                b_list += b_eq
-                current_rank = new_rank
-                applied.append(cand)
-                if current_rank == num_vars:
-                    break
+        ans_final = scavenger_dfs(M_list, b_list, current_rank, unused_candidates)
 
-    # Graceful Crash if all quadruplets mathematically exhausted
-    if current_rank < num_vars:
-        raise ValueError(f"Exhausted all quadruplets. System inherently underconstrained: Rank {current_rank} / {num_vars}")
+    if ans_final is None or None in ans_final:
+        raise ValueError(f"Constraint Scavenger exhausted all geometric branches. System mathematically deficient.")
 
-    # Exact Solve
-    ans = exact_fraction_solve(M_list, b_list, num_vars)
-    
+    print("Exact Constraints locked and physically verified.")
     pos_solved_exact = {}
     for i, u in enumerate(nodes):
-        pos_solved_exact[u] = Vertex4D(ans[4*i], ans[4*i+1], ans[4*i+2], ans[4*i+3])
+        pos_solved_exact[u] = Vertex4D(ans_final[4*i], ans_final[4*i+1], ans_final[4*i+2], ans_final[4*i+3])
         
-    return G, pos_init, pos_solved_exact, faces, n2i
-
-
+    return G, pos_init, pos_solved_exact, faces, n2i, milp_pos
 # =============================================================================
 # 6. FREEZE & EXPORT
 # =============================================================================
@@ -552,7 +723,10 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
     import matplotlib.cm as cm
 
-    def draw_debug_ax(ax, G, pos_init, pos_solved_exact, title):
+    import cProfile
+    import pstats
+
+    def draw_debug_ax(ax, G, pos_init, pos_solved_exact, title, milp_pos):
         ax.set_title(title, fontsize=14)
         
         # Float conversion just for debug plotting
@@ -561,6 +735,15 @@ if __name__ == "__main__":
         for u, v_ex in pos_solved_exact.items():
             pos_float[u] = (float(v_ex.x) + S2*(float(v_ex.y)-float(v_ex.w)), 
                             float(v_ex.z) + S2*(float(v_ex.y)+float(v_ex.w)))
+        
+        N = 4
+        if milp_pos:
+            for u, v in G.edges(): 
+                ax.plot([milp_pos[u][0]/N, milp_pos[v][0]/N], [milp_pos[u][1]/N, milp_pos[v][1]/N], 'g--', lw=4, zorder=2, alpha=0.6)
+            for u in G.nodes(): 
+                ax.plot(milp_pos[u][0]/N, milp_pos[u][1]/N, 'gx', markersize=5, zorder=3)
+        else:
+            print("milp_pos is falsy")
 
         # Plot original lightly
         for u, v in G.edges():
@@ -568,7 +751,7 @@ if __name__ == "__main__":
             
         # Plot Solved Constraints
         for u, v in G.edges():
-            ax.plot([pos_float[u][0], pos_float[v][0]], [pos_float[u][1], pos_float[v][1]], 'b-', lw=2, zorder=2, alpha=0.)
+            ax.plot([pos_float[u][0], pos_float[v][0]], [pos_float[u][1], pos_float[v][1]], 'b-', lw=2, zorder=2, alpha=0.5)
             
         for u in G.nodes():
             ax.plot(pos_float[u][0], pos_float[u][1], 'ko', markersize=4, zorder=3)
@@ -579,15 +762,19 @@ if __name__ == "__main__":
     # Example batch run
     fig, axes = plt.subplots(2, 5, figsize=(20, 8))
     axes_flat = axes.flatten()
-    for i, db_id in enumerate([483,4613]):
-    # for i, db_id in enumerate(random.sample(range(1, 9000), 10)):
+
+    # profiler = cProfile.Profile()
+    # profiler.enable()
+
+    # for i, db_id in enumerate([483,4613,5669,3744]):
+    for i, db_id in enumerate(random.sample(range(1, 9000), 10)):
         try:
-            G_raw = extract_topology(db_id, db_name="topologies_4_none.db", N=4)
-            G, pos_init, pos_solved_exact, faces, n2i = solve_tiling(G_raw, symmetry='none', N=4)
+            G_raw = extract_topology(db_id, db_name="topologies_4_diag.db", N=4)
+            G, pos_init, pos_solved_exact, faces, n2i, milp_pos = solve_tiling(G_raw, symmetry='diag', N=4)
             blob = export_frozen_blob(G, pos_solved_exact, n2i, faces)
             
             print(f"ID {db_id}: Successfully frozen.")
-            draw_debug_ax(axes_flat[i], G, pos_init, pos_solved_exact, f"ID {db_id} (Solved)")
+            draw_debug_ax(axes_flat[i], G, pos_init, pos_solved_exact, f"ID {db_id} (Solved)", milp_pos)
         except Exception as e:
             print(f"Failed to solve topology {db_id}: {e}")
             axes_flat[i].set_title(f"ID {db_id} (Failed)", color='red')
@@ -595,6 +782,3 @@ if __name__ == "__main__":
             
     plt.tight_layout()
     plt.show()
-
-
-    "There is an issue that needs another constraint added to the MILP. sometimes the mouth of a concave polygon clips through the other end, without violating any edge collapse constraints. To solve this, a constraint needs to be added for every concave vertex in every polygon. For every other edge  in the polygon (not including the two edges connected to the concave vertex), the vertex needs to be behind it (defined by the other edge's outward normal). Also, when the vertex is projected onto the other edge, it actually needs to land in the shadow. how would this be formulated mathematically"
