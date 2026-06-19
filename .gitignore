@@ -9,6 +9,9 @@
 bin/
 obj/
 
+# macOS
+.DS_Store
+
 credentials.json
 # uv
 uv.lock
